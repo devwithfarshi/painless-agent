@@ -3,7 +3,12 @@ package main
 import (
 	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/devwithfarshi/painless-agent/internal/agent"
+	"github.com/devwithfarshi/painless-agent/internal/llm"
+	"github.com/devwithfarshi/painless-agent/internal/store"
 	"github.com/devwithfarshi/painless-agent/pkg/config"
 	"github.com/devwithfarshi/painless-agent/pkg/db"
 	"github.com/devwithfarshi/painless-agent/pkg/logger"
@@ -48,5 +53,35 @@ func main() {
 	defer rdb.Close()
 	log.Info("connected to redis")
 
-	log.Info("infrastructure ready")
+	// LLM provider.
+	provider, err := llm.New(cfg)
+	if err != nil {
+		log.Error("init llm provider", "error", err)
+		os.Exit(1)
+	}
+	log.Info("llm provider ready", "provider", cfg.LLMProvider, "model", provider.Model())
+
+	// Task store.
+	taskStore := store.NewTaskStore(pool)
+
+	// Agent runtime.
+	runtime := agent.New(provider, taskStore, log, agent.DefaultRuntimeConfig())
+
+	// Debug path: set AGENT_GOAL to run a single task synchronously and exit.
+	if goal := os.Getenv("AGENT_GOAL"); goal != "" {
+		log.Info("running goal", "goal", goal)
+		if err := runtime.Run(ctx, goal); err != nil {
+			log.Error("agent run failed", "error", err)
+			os.Exit(1)
+		}
+		log.Info("agent run complete")
+		return
+	}
+
+	log.Info("infrastructure ready — set AGENT_GOAL=<goal> to run a task (HTTP server arrives in Order 6)")
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+	log.Info("shutting down")
 }

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `painless-agent` is a self-hosted, autonomous AI agent platform in Go — a Hermes-style agent with persistent memory, tool use, task planning, skill learning, sandboxed code/browser execution, and long-running workflows streamed to a web dashboard. See `md/project-goal.md` for the vision and `md/development-flow.md` for the phased architecture plan (the authoritative design doc — read it before building any `internal/` package).
 
-**Current state:** Only the foundation exists (Phases 1–2). `cmd/server/main.go` wires config → Postgres pool → pgvector → migrations → Redis and stops at "infrastructure ready". The directories under `internal/` (`llm`, `agent`, `planner`, `tools`, `memory`, `skills`, `reflection`, `scheduler`, `streaming`, `sandbox`) are **empty placeholders** for the components in the design doc. `shared/types/*.go`, `frontend/`, and `infra/scripts/*.sh` are likewise stubs/empty.
+**Current state:** Orders 1 and 2 complete. `cmd/server/main.go` wires config → Postgres → pgvector → migrations → Redis → LLM provider → TaskStore → AgentRuntime. Set `AGENT_GOAL=<goal>` to run a task end-to-end. Internal packages built so far: `internal/llm` (LLMProvider interface, OpenAI + Anthropic providers, factory), `internal/types` (Task/TaskStep/PlanStep/Skill), `internal/store` (TaskStore), `internal/agent` (Planner, ContextManager, AgentRuntime with no-op Memory/Skills/Reflector stubs). `internal/tools`, `internal/memory`, `internal/skills`, `internal/reflection`, `internal/scheduler`, `internal/streaming`, `internal/sandbox` are still empty — wired via interfaces in the runtime. `frontend/` and `infra/scripts/*.sh` are stubs.
 
 ## Commands
 
@@ -44,5 +44,5 @@ Copy `.env.example` → `.env` before `make run`. Go 1.26.
 - **Config & logging:** all config via env (`pkg/config`, fails fast on missing `DATABASE_URL`/`REDIS_URL`). Logging via `slog` (`pkg/logger`) — JSON in `production`, text otherwise. Wrap errors with context (`fmt.Errorf("...: %w", err)`), the established style throughout `pkg/`.
 
 ## Active Plan
-Always read ~/.claude/plans/read-md-project-goal-md-and-md-developme-gentle-neumann.md.md at the start of each session.
-Current progress: Step 1 complete, starting Step 2.
+Always read ~/.claude/plans/read-md-project-goal-md-and-md-developme-gentle-neumann.md at the start of each session.
+Current progress: Steps 1 and 2 complete, starting Step 3.
