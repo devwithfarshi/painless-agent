@@ -1,0 +1,97 @@
+md
+
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*~
+
+# =========================
+# Env / Secrets
+# =========================
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# =========================
+# Logs / Runtime
+# =========================
+*.log
+logs/
+tmp/
+temp/
+*.pid
+*.seed
+*.out
+
+# =========================
+# Go Backend
+# =========================
+backend/bin/
+backend/build/
+backend/dist/
+backend/coverage.out
+backend/cover.out
+backend/*.test
+
+# Go workspaces / binaries (repo-wide safety)
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+
+# =========================
+# Node / Frontend (Next.js)
+# =========================
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+frontend/.vercel/
+frontend/coverage/
+frontend/.eslintcache
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+
+# =========================
+# Package managers (repo-wide safety)
+# =========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =========================
+# Test / Coverage
+# =========================
+coverage/
+*.coverprofile
+.nyc_output/
+
+# =========================
+# Docker / Local overrides
+# =========================
+docker-compose.override.yml
+
+# =========================
+# Misc caches
+# =========================
+.cache/
