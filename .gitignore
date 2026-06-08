@@ -45,6 +45,7 @@ backend/dist/
 backend/coverage.out
 backend/cover.out
 backend/*.test
+backend/repl
 
 # Go workspaces / binaries (repo-wide safety)
 bin/
