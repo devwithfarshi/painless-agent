@@ -382,7 +382,8 @@ func FetchCopilotModels(ctx context.Context, githubToken string) ([]string, erro
 	return models, nil
 }
 
-// isCopilotChatModel filters out embedding, internal routing, and non-chat models.
+// isCopilotChatModel filters out models that are not accessible via /chat/completions:
+// embeddings, internal routing models, code-completion (codex) models, and editor-specific stubs.
 func isCopilotChatModel(id string) bool {
 	excludePrefixes := []string{
 		"text-embedding",
@@ -390,8 +391,19 @@ func isCopilotChatModel(id string) bool {
 		"trajectory",
 		"oswe-",
 	}
+	excludeSuffixes := []string{
+		"-codex",
+		"-picker",
+		"-secondary",
+		"-tertiary",
+	}
 	for _, p := range excludePrefixes {
 		if len(id) >= len(p) && id[:len(p)] == p {
+			return false
+		}
+	}
+	for _, s := range excludeSuffixes {
+		if len(id) >= len(s) && id[len(id)-len(s):] == s {
 			return false
 		}
 	}

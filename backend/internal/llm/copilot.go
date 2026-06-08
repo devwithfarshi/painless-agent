@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -70,7 +71,8 @@ func (p *CopilotProvider) Complete(ctx context.Context, req CompletionRequest) (
 	defer httpResp.Body.Close()
 
 	if httpResp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("copilot complete: HTTP %d", httpResp.StatusCode)
+		body, _ := io.ReadAll(httpResp.Body)
+		return nil, fmt.Errorf("copilot complete: HTTP %d: %s", httpResp.StatusCode, string(body))
 	}
 
 	var cr chatCompletionResponse
