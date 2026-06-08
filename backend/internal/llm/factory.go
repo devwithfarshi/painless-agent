@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/devwithfarshi/painless-agent/pkg/config"
@@ -29,8 +30,19 @@ func New(cfg *config.Config) (LLMProvider, error) {
 		}
 		return NewAnthropic(cfg.AnthropicAPIKey, model), nil
 
+	case "copilot":
+		model := cfg.LLMModel
+		if model == "" {
+			model = "gpt-4o"
+		}
+		githubToken, err := ResolveGitHubToken(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("copilot: resolve GitHub token: %w", err)
+		}
+		return NewCopilot(githubToken, model), nil
+
 	default:
-		return nil, fmt.Errorf("unknown LLM_PROVIDER %q (supported: openai, anthropic)", cfg.LLMProvider)
+		return nil, fmt.Errorf("unknown LLM_PROVIDER %q (supported: openai, anthropic, copilot)", cfg.LLMProvider)
 	}
 }
 

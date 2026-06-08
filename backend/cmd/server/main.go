@@ -8,6 +8,7 @@ import (
 
 	"github.com/devwithfarshi/painless-agent/internal/agent"
 	"github.com/devwithfarshi/painless-agent/internal/llm"
+	"github.com/devwithfarshi/painless-agent/internal/onboarding"
 	"github.com/devwithfarshi/painless-agent/internal/store"
 	"github.com/devwithfarshi/painless-agent/pkg/config"
 	"github.com/devwithfarshi/painless-agent/pkg/db"
@@ -16,6 +17,21 @@ import (
 
 func main() {
 	ctx := context.Background()
+
+	// First-run onboarding: collect provider, model, and API credentials interactively.
+	if onboarding.IsFirstRun() {
+		if err := onboarding.Run(ctx, ".env"); err != nil {
+			os.Stderr.WriteString("setup failed: " + err.Error() + "\n")
+			os.Exit(1)
+		}
+	}
+
+	// Inject the saved user name so config.Load picks it up via AGENT_USER_NAME.
+	if name := onboarding.LoadUserName(); name != "" {
+		if os.Getenv("AGENT_USER_NAME") == "" {
+			os.Setenv("AGENT_USER_NAME", name)
+		}
+	}
 
 	cfg, err := config.Load(".env")
 	if err != nil {
@@ -59,7 +75,11 @@ func main() {
 		log.Error("init llm provider", "error", err)
 		os.Exit(1)
 	}
-	log.Info("llm provider ready", "provider", cfg.LLMProvider, "model", provider.Model())
+	if cfg.UserName != "" {
+		log.Info("llm provider ready", "provider", cfg.LLMProvider, "model", provider.Model(), "user", cfg.UserName)
+	} else {
+		log.Info("llm provider ready", "provider", cfg.LLMProvider, "model", provider.Model())
+	}
 
 	// Task store.
 	taskStore := store.NewTaskStore(pool)

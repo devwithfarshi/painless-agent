@@ -12,7 +12,10 @@ type Config struct {
 	RedisURL    string
 	Env         string
 
-	// LLM chat provider. One of: "openai", "anthropic".
+	// UserName is set during first-run onboarding and used for personalisation.
+	UserName string
+
+	// LLM chat provider. One of: "openai", "anthropic", "copilot".
 	LLMProvider     string
 	OpenAIAPIKey    string
 	AnthropicAPIKey string
@@ -27,7 +30,8 @@ type Config struct {
 
 func Load(envFile string) (*Config, error) {
 	if envFile != "" {
-		if err := godotenv.Load(envFile); err != nil {
+		// Tolerate a missing .env file — values can come from env vars or onboarding config.
+		if err := godotenv.Load(envFile); err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("load env file: %w", err)
 		}
 	}
@@ -36,6 +40,8 @@ func Load(envFile string) (*Config, error) {
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		RedisURL:    os.Getenv("REDIS_URL"),
 		Env:         envOr("ENV", "development"),
+
+		UserName: os.Getenv("AGENT_USER_NAME"),
 
 		LLMProvider:     envOr("LLM_PROVIDER", "anthropic"),
 		OpenAIAPIKey:    os.Getenv("OPENAI_API_KEY"),
@@ -63,8 +69,11 @@ func Load(envFile string) (*Config, error) {
 		if cfg.AnthropicAPIKey == "" {
 			return nil, fmt.Errorf("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic")
 		}
+	case "copilot":
+		// GitHub token is resolved at provider init via COPILOT_GITHUB_TOKEN / GH_TOKEN /
+		// GITHUB_TOKEN env vars, `gh auth token`, stored token, or device-code login.
 	default:
-		return nil, fmt.Errorf("unknown LLM_PROVIDER %q (supported: openai, anthropic)", cfg.LLMProvider)
+		return nil, fmt.Errorf("unknown LLM_PROVIDER %q (supported: openai, anthropic, copilot)", cfg.LLMProvider)
 	}
 
 	return cfg, nil
