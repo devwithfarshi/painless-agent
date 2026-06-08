@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `painless-agent` is a self-hosted, autonomous AI agent platform in Go — a Hermes-style agent with persistent memory, tool use, task planning, skill learning, sandboxed code/browser execution, and long-running workflows streamed to a web dashboard. See `md/project-goal.md` for the vision and `md/development-flow.md` for the phased architecture plan (the authoritative design doc — read it before building any `internal/` package).
 
-**Current state:** Orders 1, 2, and 3 complete, plus Copilot provider, first-run onboarding wizard, and terminal REPL. `cmd/server/main.go` wires onboarding → config → Postgres → pgvector → migrations → Redis → LLM provider → embedder → memory store → tool engine → TaskStore → AgentRuntime. `cmd/repl/main.go` is an interactive chat loop with the same tool engine. Set `AGENT_GOAL=<goal>` to run an autonomous task end-to-end.
+**Current state:** Orders 1–4 complete, plus Copilot provider, first-run onboarding wizard, and terminal REPL. `cmd/server/main.go` wires onboarding → config → Postgres → pgvector → migrations → Redis → LLM provider → embedder → memory store → tool engine (including Docker sandbox, browser, GitHub) → TaskStore → AgentRuntime. `cmd/repl/main.go` is an interactive chat loop with the same tool engine. Set `AGENT_GOAL=<goal>` to run an autonomous task end-to-end.
 
 Internal packages built so far:
 - `internal/llm` — `LLMProvider` interface; OpenAI, Anthropic, and **GitHub Copilot** providers; factory. Copilot uses device-code OAuth, Copilot API token exchange/caching, and the OpenAI-compatible `/chat/completions` endpoint. Key exported functions: `ResolveGitHubToken(ctx)`, `ExchangeCopilotToken(ctx, githubToken)`, `FetchCopilotModels(ctx, githubToken)`.
@@ -14,10 +14,11 @@ Internal packages built so far:
 - `internal/types` — `Task`/`TaskStep`/`PlanStep`/`Skill`
 - `internal/store` — `TaskStore`, `ToolLogStore` (writes `tool_logs` table)
 - `internal/agent` — `Planner` (injects tool schemas into prompt), `ContextManager`, `AgentRuntime` with real Think→Act→Observe loop (max 10 tool iterations/step). Interfaces: `MemoryStore`, `SkillStore`, `Reflector`, `ToolEngine` (with `Execute`), `ToolLogStore`. Wire via `runtime.With*` methods.
-- `internal/tools` — `Tool` interface, `ToolEngine` registry with output truncation/summarisation. Registered tools: `web_search` (Brave/SerpAPI), `filesystem` (path-allowlisted to `FilesystemRoot`), `http_client` (GET/POST with size + timeout caps), `summarizer` (LLM-backed condense), `memory_store` (agent-triggered memory write).
+- `internal/tools` — `Tool` interface, `ToolEngine` registry with output truncation/summarisation. Registered tools: `web_search` (Brave/SerpAPI), `filesystem` (path-allowlisted to `FilesystemRoot`), `http_client` (GET/POST with size + timeout caps), `summarizer` (LLM-backed condense), `memory_store` (agent-triggered memory write), `code_executor` (Docker sandbox), `browser` (headless Chromium via chromedp), `github` (create repo + commit/push via go-github + go-git).
 - `internal/memory` — `MemoryStore` interface + `pgMemoryStore`: `Store` embeds content then inserts; `Search` embeds query then `ORDER BY embedding <=> $1::vector LIMIT k` (cosine); `RecentContext` fetches recent rows by task. Uses `pgvector.NewVector().String()` + `::vector` cast (text encoding, no codec registration needed).
+- `internal/sandbox` — `Runner` wraps the Docker client. `Run(ctx, RunOpts)` creates and starts a container enforcing `--network=none`, `--memory=256m`, `--cpus=0.5`. `Wait` blocks until exit or timeout. `Logs` demultiplexes stdout/stderr via `stdcopy.StdCopy`. `Remove` force-removes. Image name is always derived from the internal `supportedLanguages` map in `code_executor.go`, never from user input.
 
-`internal/skills`, `internal/reflection`, `internal/scheduler`, `internal/streaming`, `internal/sandbox` are still empty — wired via interfaces in the runtime. `frontend/` and `infra/scripts/*.sh` are stubs.
+`internal/skills`, `internal/reflection`, `internal/scheduler`, `internal/streaming` are still empty — wired via interfaces in the runtime. `frontend/` and `infra/scripts/*.sh` are stubs.
 
 ## Commands
 
@@ -69,10 +70,18 @@ Copy `.env.example` → `.env` before `make run` (only `DATABASE_URL`/`REDIS_URL
 
 - **Config additions (Orders 2–3):** `UserName` (from `AGENT_USER_NAME`), `BraveAPIKey`, `SerpAPIKey`, `FilesystemRoot` (default `"workspace"`), `ToolMaxOutputKB` (default 32), `ToolTimeoutSecs` (default 30), `HTTPMaxBodyKB` (default 256). Missing `.env` is tolerated — only `DATABASE_URL`/`REDIS_URL` are hard-required. Comment out `AGENT_GOAL` in `.env` to stop the auto-task on startup.
 
+- **Config additions (Order 4):** `DockerHost` (optional, defaults to `DOCKER_HOST` env / system socket), `CodeExecTimeoutSecs` (default 30), `GitHubToken`. All three are optional — tools are skipped gracefully if unavailable.
+
+- **Sandbox patterns (Order 4):** `sandbox.NewRunner()` returns `(*Runner, error)` — error means Docker isn't available; caller should skip tool registration and log a warning. `Runner.Run` returns the container ID; caller must always `defer runner.Remove(context.Background(), id)` to prevent leaks. The `code_executor` tool uses a fixed `supportedLanguages` map to derive the image name — user input **never** influences the Docker image used (sandbox-escape prevention).
+
+- **Browser tool patterns (Order 4):** `tools.NewBrowserTool(workspaceRoot)` creates a shared `chromedp.ExecAllocator` (Chrome is launched lazily on first Execute call). Call `browserTool.Close()` on server shutdown to clean up the Chrome process. Screenshots are saved as `screenshot_<ms>.png` in the workspace directory. Each `Execute` call gets its own isolated tab; there is no cross-call browser state.
+
+- **GitHub tool patterns (Order 4):** `tools.NewGitHubTool(token)` wraps `go-github/v73` (REST) + `go-git/v5` (git ops). `create_repo` creates under the authenticated user (empty owner = ""). `commit_and_push` resolves owner via `Users.Get("")` if not provided, shallow-clones to a temp dir, writes files, commits, pushes, and removes the temp dir. File paths are validated against the repo tmpDir root to reject traversal.
+
 - **Dependency injection pattern (Order 2):** `AgentRuntime` accepts `MemoryStore`, `SkillStore`, `Reflector`, `ToolEngine`, `ToolLogStore` as interfaces defined in `internal/agent/runtime.go`. No-op implementations live there too. Concrete implementations are wired from `cmd/server/main.go` via `runtime.With*` methods. Never change the `Run` signature; always add capability via the `With*` methods.
 
 - **REPL pattern:** `cmd/repl/main.go` is an interactive terminal chat loop. It uses the same tool engine and memory store as the server but skips the planning phase — direct chat with tool use (Think→Act→Observe, max 10 iterations). Uses `github.com/chzyer/readline` for arrow keys, history, and Ctrl+C handling. Session UUID links all tool_logs; each response is stored to memory. Memory search enriches each prompt with the 3 most relevant past entries.
 
 ## Active Plan
 Always read ~/.claude/plans/read-md-project-goal-md-and-md-developme-gentle-neumann.md at the start of each session.
-Current progress: Orders 1, 2, and 3 complete (plus Copilot provider, onboarding wizard, and terminal REPL added). Starting Order 4.
+Current progress: Orders 1–4 complete (plus Copilot provider, onboarding wizard, and terminal REPL added). Starting Order 5.

@@ -10,6 +10,7 @@ import (
 	"github.com/devwithfarshi/painless-agent/internal/llm"
 	memorystore "github.com/devwithfarshi/painless-agent/internal/memory"
 	"github.com/devwithfarshi/painless-agent/internal/onboarding"
+	"github.com/devwithfarshi/painless-agent/internal/sandbox"
 	"github.com/devwithfarshi/painless-agent/internal/store"
 	"github.com/devwithfarshi/painless-agent/internal/tools"
 	"github.com/devwithfarshi/painless-agent/pkg/config"
@@ -112,6 +113,29 @@ func main() {
 	if pgMem != nil {
 		toolEngine.Register(tools.NewMemoryTool(pgMem))
 	}
+
+	// Code executor: requires a running Docker daemon.
+	dockerRunner, dockerErr := sandbox.NewRunner()
+	if dockerErr != nil {
+		log.Warn("docker unavailable — code_executor tool disabled", "error", dockerErr)
+	} else {
+		toolEngine.Register(tools.NewCodeExecutorTool(dockerRunner, cfg.CodeExecTimeoutSecs))
+		log.Info("code_executor tool registered")
+	}
+
+	// Browser tool: requires Chrome/Chromium in PATH.
+	browserTool := tools.NewBrowserTool(cfg.FilesystemRoot)
+	toolEngine.Register(browserTool)
+	log.Info("browser tool registered")
+
+	// GitHub tool: only registered when a token is configured.
+	if cfg.GitHubToken != "" {
+		toolEngine.Register(tools.NewGitHubTool(cfg.GitHubToken))
+		log.Info("github tool registered")
+	} else {
+		log.Info("GITHUB_TOKEN not set — github tool disabled")
+	}
+
 	log.Info("tool engine ready", "tools", len(toolEngine.Definitions()))
 
 	// Agent runtime — wire all dependencies.
@@ -140,4 +164,8 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	log.Info("shutting down")
+	browserTool.Close()
+	if dockerRunner != nil {
+		_ = dockerRunner.Close()
+	}
 }

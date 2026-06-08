@@ -34,6 +34,13 @@ type Config struct {
 	ToolMaxOutputKB   int    // max tool output size in KB before summarisation (default: 32)
 	ToolTimeoutSecs   int    // HTTP/tool execution timeout in seconds (default: 30)
 	HTTPMaxBodyKB     int    // max HTTP response body in KB (default: 256)
+
+	// Code executor (Docker sandbox).
+	DockerHost          string // Docker daemon socket; empty = DOCKER_HOST env / default
+	CodeExecTimeoutSecs int    // per-execution timeout for the sandbox (default: 30)
+
+	// GitHub tool.
+	GitHubToken string // personal access token with repo scope
 }
 
 func Load(envFile string) (*Config, error) {
@@ -65,6 +72,11 @@ func Load(envFile string) (*Config, error) {
 		ToolMaxOutputKB: envInt("TOOL_MAX_OUTPUT_KB", 32),
 		ToolTimeoutSecs: envInt("TOOL_TIMEOUT_SECS", 30),
 		HTTPMaxBodyKB:   envInt("HTTP_MAX_BODY_KB", 256),
+
+		DockerHost:          os.Getenv("DOCKER_HOST"), // empty = default socket
+		CodeExecTimeoutSecs: envInt("CODE_EXEC_TIMEOUT_SECS", 30),
+
+		GitHubToken: os.Getenv("GITHUB_TOKEN"),
 	}
 
 	if cfg.DatabaseURL == "" {
