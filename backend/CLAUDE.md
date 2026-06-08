@@ -43,6 +43,10 @@ Copy `.env.example` → `.env` before `make run`. Go 1.26.
 
 - **Config & logging:** all config via env (`pkg/config`, fails fast on missing `DATABASE_URL`/`REDIS_URL`). Logging via `slog` (`pkg/logger`) — JSON in `production`, text otherwise. Wrap errors with context (`fmt.Errorf("...: %w", err)`), the established style throughout `pkg/`.
 
+- **LLM SDK versions and patterns (Order 2):** OpenAI uses `github.com/openai/openai-go/v3` (package `openai`); Anthropic uses `github.com/anthropics/anthropic-sdk-go` (package `anthropic`). Both `openai.Client` and `anthropic.Client` are **value types** (not pointers) — `NewClient` returns by value. OpenAI tools use `[]openai.ChatCompletionToolUnionParam{OfFunction: ...}`; response tool calls come back as `[]ChatCompletionMessageToolCallUnion` with direct `.ID`/`.Function.Name`/`.Function.Arguments` fields. Anthropic tools use `[]anthropic.ToolUnionParam{OfTool: &ToolParam{...}}`; response tool-use blocks are accessed via `block.AsAny().(anthropic.ToolUseBlock)`.
+
+- **Dependency injection pattern (Order 2):** `AgentRuntime` accepts `MemoryStore`, `SkillStore`, `Reflector`, `ToolEngine` as interfaces defined in `internal/agent/runtime.go`. No-op implementations live there too. Concrete implementations (Order 3/5) are wired from `cmd/server/main.go` via `runtime.WithMemory/WithSkills/WithReflector/WithTools`. Never change the `Run` signature; always add capability via the `With*` methods.
+
 ## Active Plan
 Always read ~/.claude/plans/read-md-project-goal-md-and-md-developme-gentle-neumann.md at the start of each session.
 Current progress: Steps 1 and 2 complete, starting Step 3.
