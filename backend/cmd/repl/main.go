@@ -1,15 +1,16 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/chzyer/readline"
 	"github.com/google/uuid"
 
 	"github.com/devwithfarshi/painless-agent/internal/llm"
@@ -127,17 +128,19 @@ func runREPL(
 		{Role: llm.RoleSystem, Content: systemPrompt},
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
-	prompt := userName + "> "
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          userName + "> ",
+		HistoryFile:     os.TempDir() + "/painless-agent-history",
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "readline init:", err)
+		return
+	}
+	defer rl.Close()
 
 	for {
-		fmt.Print(prompt)
-
-		if !scanner.Scan() {
-			fmt.Println()
-			break
-		}
-
 		select {
 		case <-ctx.Done():
 			fmt.Println("\ngoodbye")
@@ -145,7 +148,24 @@ func runREPL(
 		default:
 		}
 
-		input := strings.TrimSpace(scanner.Text())
+		line, err := rl.Readline()
+		if err == readline.ErrInterrupt {
+			if line == "" {
+				fmt.Println("goodbye")
+				return
+			}
+			continue
+		}
+		if err == io.EOF {
+			fmt.Println("goodbye")
+			return
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "readline:", err)
+			return
+		}
+
+		input := strings.TrimSpace(line)
 		if input == "" {
 			continue
 		}
@@ -178,7 +198,7 @@ func runREPL(
 		}
 
 		history = updatedHistory
-		fmt.Printf("\nagent> %s\n\n", response)
+		fmt.Printf("\nagent> %s\n", response)
 
 		// Store the exchange in memory for future sessions.
 		if memStore != nil {
