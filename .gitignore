@@ -92,6 +92,13 @@ coverage/
 docker-compose.override.yml
 
 # =========================
+# Agent workspace (generated files)
+# =========================
+backend/workspace/*
+!backend/workspace/.gitkeep
+
+# =========================
 # Misc caches
 # =========================
 .cache/
+prompt-base.txt

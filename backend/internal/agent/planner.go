@@ -46,16 +46,22 @@ var plannerTool = llm.ToolDefinition{
 
 type Planner struct {
 	provider llm.LLMProvider
+	tools    []llm.ToolDefinition
 }
 
 func NewPlanner(provider llm.LLMProvider) *Planner {
 	return &Planner{provider: provider}
 }
 
+// SetTools updates the tool list used when building planner prompts.
+func (p *Planner) SetTools(tools []llm.ToolDefinition) {
+	p.tools = tools
+}
+
 // Plan generates an ordered list of steps for goal. memCtx contains relevant
 // memories (strings); skill is an optional matching workflow template.
 func (p *Planner) Plan(ctx context.Context, goal string, memCtx []string, skill *types.Skill) ([]types.PlanStep, error) {
-	userMsg := buildPlannerUserMessage(goal, memCtx, skill)
+	userMsg := buildPlannerUserMessage(goal, memCtx, skill, p.tools)
 
 	resp, err := p.provider.Complete(ctx, llm.CompletionRequest{
 		Messages: []llm.Message{
@@ -80,7 +86,7 @@ func (p *Planner) Plan(ctx context.Context, goal string, memCtx []string, skill 
 	return parsePlanInput(tc.Input)
 }
 
-func buildPlannerUserMessage(goal string, memCtx []string, skill *types.Skill) string {
+func buildPlannerUserMessage(goal string, memCtx []string, skill *types.Skill, tools []llm.ToolDefinition) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Goal: %s", goal)
 
@@ -97,6 +103,13 @@ func buildPlannerUserMessage(goal string, memCtx []string, skill *types.Skill) s
 			fmt.Fprintf(&b, "%d. %s\n", i+1, s.Description)
 		}
 		b.WriteString("Adapt the skill template to the current goal as needed.\n")
+	}
+
+	if len(tools) > 0 {
+		b.WriteString("\n\nAvailable tools (use tool_hint to guide step assignment):\n")
+		for _, t := range tools {
+			fmt.Fprintf(&b, "- %s: %s\n", t.Name, t.Description)
+		}
 	}
 
 	b.WriteString("\n\nCreate a detailed step-by-step plan using the create_plan tool.")

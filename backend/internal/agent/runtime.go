@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -29,9 +30,15 @@ type Reflector interface {
 	Reflect(ctx context.Context, task types.Task, steps []types.TaskStep) error
 }
 
-// ToolEngine is implemented in Order 3 (internal/tools). Noop until then.
+// ToolEngine is implemented in Order 3 (internal/tools).
 type ToolEngine interface {
 	Definitions() []llm.ToolDefinition
+	Execute(ctx context.Context, name string, input map[string]any) (string, error)
+}
+
+// ToolLogStore persists tool call records (internal/store.ToolLogStore).
+type ToolLogStore interface {
+	Log(ctx context.Context, taskID, stepID uuid.UUID, toolName string, input map[string]any, output string, durationMs int) error
 }
 
 // AgentRuntime orchestrates the plan→think→act→observe loop for a goal.
@@ -43,6 +50,7 @@ type AgentRuntime struct {
 	skills    SkillStore
 	reflector Reflector
 	tools     ToolEngine
+	toolLogs  ToolLogStore
 	log       *slog.Logger
 }
 
@@ -64,6 +72,7 @@ func New(provider llm.LLMProvider, tasks *store.TaskStore, log *slog.Logger, cfg
 		skills:    noopSkills{},
 		reflector: noopReflect{},
 		tools:     noopTools{},
+		toolLogs:  noopToolLogs{},
 		log:       log,
 	}
 }
@@ -77,8 +86,15 @@ func (r *AgentRuntime) WithSkills(s SkillStore) *AgentRuntime { r.skills = s; re
 // WithReflector wires in the reflector (called by Order 5 bootstrap).
 func (r *AgentRuntime) WithReflector(rf Reflector) *AgentRuntime { r.reflector = rf; return r }
 
-// WithTools wires in the tool engine (called by Order 3 bootstrap).
-func (r *AgentRuntime) WithTools(t ToolEngine) *AgentRuntime { r.tools = t; return r }
+// WithTools wires in the tool engine and updates the planner's tool list.
+func (r *AgentRuntime) WithTools(t ToolEngine) *AgentRuntime {
+	r.tools = t
+	r.planner.SetTools(t.Definitions())
+	return r
+}
+
+// WithToolLogs wires in the tool log store (called by Order 3 bootstrap).
+func (r *AgentRuntime) WithToolLogs(tl ToolLogStore) *AgentRuntime { r.toolLogs = tl; return r }
 
 // Run executes the full agent loop for goal: create task → plan → execute → reflect.
 func (r *AgentRuntime) Run(ctx context.Context, goal string) error {
@@ -92,7 +108,7 @@ func (r *AgentRuntime) Run(ctx context.Context, goal string) error {
 		return fmt.Errorf("set task running: %w", err)
 	}
 
-	// Pull relevant memory context and matching skill (noops in Order 2).
+	// Pull relevant memory context and matching skill (noops until Order 3/5).
 	memCtx, _ := r.memory.RecentContext(ctx, task.ID, 5)
 	skill, _ := r.skills.Match(ctx, goal)
 
@@ -118,7 +134,7 @@ func (r *AgentRuntime) Run(ctx context.Context, goal string) error {
 		dbSteps = append(dbSteps, s)
 	}
 
-	// Execute loop — Think → Observe per step.
+	// Execute loop — Think → Act → Observe per step.
 	ctxMgr := NewContextManager(8000)
 	ctxMgr.Add(llm.Message{
 		Role:    llm.RoleSystem,
@@ -138,38 +154,29 @@ func (r *AgentRuntime) Run(ctx context.Context, goal string) error {
 			return fmt.Errorf("mark step running: %w", err)
 		}
 
-		// Think: ask the LLM to work through this step.
 		ctxMgr.Add(llm.Message{
 			Role:    llm.RoleUser,
 			Content: fmt.Sprintf("Execute step %d: %s", i+1, step.Description),
 		})
 
-		resp, err := r.provider.Complete(ctx, llm.CompletionRequest{
-			Messages:    ctxMgr.Window(),
-			Tools:       r.tools.Definitions(), // empty in Order 2
-			Temperature: 0.7,
-			MaxTokens:   2048,
-		})
+		output, err := r.executeStep(ctx, task, step, ctxMgr)
 		if err != nil {
 			_ = r.tasks.UpdateStep(ctx, step.ID, types.StepStatusFailed, err.Error())
 			r.log.Error("step failed", "step_id", step.ID, "error", err)
 			continue
 		}
 
-		// Observe: append the response to the rolling context.
-		ctxMgr.Add(llm.Message{Role: llm.RoleAssistant, Content: resp.Content})
-
-		if err := r.tasks.UpdateStep(ctx, step.ID, types.StepStatusCompleted, resp.Content); err != nil {
+		if err := r.tasks.UpdateStep(ctx, step.ID, types.StepStatusCompleted, output); err != nil {
 			return fmt.Errorf("persist step output: %w", err)
 		}
 
-		// Store result in memory (noop in Order 2).
-		_ = r.memory.Store(ctx, resp.Content, nil, task.ID)
+		// Store step result in memory.
+		_ = r.memory.Store(ctx, output, nil, task.ID)
 
-		r.log.Info("step complete", "step_id", step.ID, "tokens_in", resp.Usage.InputTokens, "tokens_out", resp.Usage.OutputTokens)
+		r.log.Info("step complete", "step_id", step.ID)
 	}
 
-	// Reflect on the completed task (noop in Order 2).
+	// Reflect on the completed task (noop until Order 5).
 	latestSteps, _ := r.tasks.ListSteps(ctx, task.ID)
 	_ = r.reflector.Reflect(ctx, task, latestSteps)
 
@@ -180,16 +187,68 @@ func (r *AgentRuntime) Run(ctx context.Context, goal string) error {
 	return nil
 }
 
+// executeStep runs the Think→Act→Observe inner loop for a single step.
+// The LLM may call tools zero or more times before producing a final answer.
+func (r *AgentRuntime) executeStep(ctx context.Context, task types.Task, step types.TaskStep, ctxMgr *ContextManager) (string, error) {
+	const maxIter = 10
+	for iter := 0; iter < maxIter; iter++ {
+		resp, err := r.provider.Complete(ctx, llm.CompletionRequest{
+			Messages:    ctxMgr.Window(),
+			Tools:       r.tools.Definitions(),
+			Temperature: 0.7,
+			MaxTokens:   2048,
+		})
+		if err != nil {
+			return "", fmt.Errorf("llm complete: %w", err)
+		}
+
+		if len(resp.ToolCalls) == 0 {
+			// Final answer — add to context and return.
+			ctxMgr.Add(llm.Message{Role: llm.RoleAssistant, Content: resp.Content})
+			return resp.Content, nil
+		}
+
+		// Add the assistant's tool-call message to context before executing.
+		ctxMgr.Add(llm.Message{
+			Role:      llm.RoleAssistant,
+			Content:   resp.Content,
+			ToolCalls: resp.ToolCalls,
+		})
+
+		// Execute each tool call and append results.
+		for _, tc := range resp.ToolCalls {
+			start := time.Now()
+			result, execErr := r.tools.Execute(ctx, tc.Name, tc.Input)
+			durationMs := int(time.Since(start).Milliseconds())
+
+			if execErr != nil {
+				result = fmt.Sprintf("tool %q unavailable: %s", tc.Name, execErr)
+			}
+
+			_ = r.toolLogs.Log(ctx, task.ID, step.ID, tc.Name, tc.Input, result, durationMs)
+
+			ctxMgr.Add(llm.Message{
+				Role:       llm.RoleTool,
+				Content:    result,
+				ToolCallID: tc.ID,
+				Name:       tc.Name,
+			})
+
+			r.log.Info("tool called", "tool", tc.Name, "step_id", step.ID, "duration_ms", durationMs)
+		}
+	}
+	return "", fmt.Errorf("tool loop exceeded %d iterations", maxIter)
+}
+
 func executionSystemPrompt(goal string) string {
 	return fmt.Sprintf(`You are an autonomous AI agent executing a task step-by-step.
 Overall goal: %s
 
-For each step you receive, think carefully and produce a thorough, accurate response.
-If a step involves research, synthesize the best answer from your knowledge.
+For each step, think carefully and use the available tools as needed.
 Be specific, concise, and action-oriented.`, goal)
 }
 
-// ── No-op implementations for Order 2 ────────────────────────────────────────
+// ── No-op implementations ─────────────────────────────────────────────────────
 
 type noopMemory struct{}
 
@@ -210,3 +269,12 @@ func (noopReflect) Reflect(_ context.Context, _ types.Task, _ []types.TaskStep) 
 type noopTools struct{}
 
 func (noopTools) Definitions() []llm.ToolDefinition { return nil }
+func (noopTools) Execute(_ context.Context, name string, _ map[string]any) (string, error) {
+	return "", fmt.Errorf("tool %q not available", name)
+}
+
+type noopToolLogs struct{}
+
+func (noopToolLogs) Log(_ context.Context, _, _ uuid.UUID, _ string, _ map[string]any, _ string, _ int) error {
+	return nil
+}

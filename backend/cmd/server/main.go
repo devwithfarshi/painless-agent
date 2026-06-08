@@ -8,8 +8,10 @@ import (
 
 	"github.com/devwithfarshi/painless-agent/internal/agent"
 	"github.com/devwithfarshi/painless-agent/internal/llm"
+	memorystore "github.com/devwithfarshi/painless-agent/internal/memory"
 	"github.com/devwithfarshi/painless-agent/internal/onboarding"
 	"github.com/devwithfarshi/painless-agent/internal/store"
+	"github.com/devwithfarshi/painless-agent/internal/tools"
 	"github.com/devwithfarshi/painless-agent/pkg/config"
 	"github.com/devwithfarshi/painless-agent/pkg/db"
 	"github.com/devwithfarshi/painless-agent/pkg/logger"
@@ -69,7 +71,7 @@ func main() {
 	defer rdb.Close()
 	log.Info("connected to redis")
 
-	// LLM provider.
+	// LLM chat provider.
 	provider, err := llm.New(cfg)
 	if err != nil {
 		log.Error("init llm provider", "error", err)
@@ -81,11 +83,45 @@ func main() {
 		log.Info("llm provider ready", "provider", cfg.LLMProvider, "model", provider.Model())
 	}
 
-	// Task store.
-	taskStore := store.NewTaskStore(pool)
+	// Embedder (always OpenAI for 1536-dim vectors).
+	// pgMem satisfies both memory.MemoryStore and agent.MemoryStore (same method set).
+	var pgMem memorystore.MemoryStore
+	embedder, embErr := llm.NewEmbedder(cfg)
+	if embErr != nil {
+		log.Warn("embedder unavailable — memory store disabled", "error", embErr)
+	} else {
+		log.Info("embedder ready", "model", embedder.Model())
+		pgMem = memorystore.NewPgMemoryStore(pool, embedder)
+	}
 
-	// Agent runtime.
-	runtime := agent.New(provider, taskStore, log, agent.DefaultRuntimeConfig())
+	// Task and tool-log stores.
+	taskStore := store.NewTaskStore(pool)
+	toolLogStore := store.NewToolLogStore(pool)
+
+	// Tool engine: summarizer + all registered tools.
+	summarizer := tools.NewSummarizerTool(provider)
+	maxOutput := cfg.ToolMaxOutputKB * 1024
+	if maxOutput == 0 {
+		maxOutput = 32 * 1024
+	}
+	toolEngine := tools.NewEngine(maxOutput, summarizer.Summarize)
+	toolEngine.Register(tools.NewHTTPClientTool(cfg.ToolTimeoutSecs, cfg.HTTPMaxBodyKB))
+	toolEngine.Register(tools.NewFilesystemTool(cfg.FilesystemRoot))
+	toolEngine.Register(tools.NewWebSearchTool(cfg.BraveAPIKey, cfg.SerpAPIKey))
+	toolEngine.Register(summarizer)
+	if pgMem != nil {
+		toolEngine.Register(tools.NewMemoryTool(pgMem))
+	}
+	log.Info("tool engine ready", "tools", len(toolEngine.Definitions()))
+
+	// Agent runtime — wire all dependencies.
+	runtime := agent.New(provider, taskStore, log, agent.DefaultRuntimeConfig()).
+		WithTools(toolEngine).
+		WithToolLogs(toolLogStore)
+	if pgMem != nil {
+		// pgMem implements agent.MemoryStore (same method set — structural typing).
+		runtime = runtime.WithMemory(pgMem)
+	}
 
 	// Debug path: set AGENT_GOAL to run a single task synchronously and exit.
 	if goal := os.Getenv("AGENT_GOAL"); goal != "" {

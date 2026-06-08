@@ -26,6 +26,14 @@ type Config struct {
 	// memories would be required if the embedding model/dims change.
 	EmbeddingProvider string // reserved for future providers; currently only "openai"
 	EmbeddingModel    string // defaults to "text-embedding-3-small" (1536 dims)
+
+	// Tool configuration.
+	BraveAPIKey       string // Brave Search API key (primary web search)
+	SerpAPIKey        string // SerpAPI key (fallback web search)
+	FilesystemRoot    string // allowed root for filesystem tool (default: current dir)
+	ToolMaxOutputKB   int    // max tool output size in KB before summarisation (default: 32)
+	ToolTimeoutSecs   int    // HTTP/tool execution timeout in seconds (default: 30)
+	HTTPMaxBodyKB     int    // max HTTP response body in KB (default: 256)
 }
 
 func Load(envFile string) (*Config, error) {
@@ -50,6 +58,13 @@ func Load(envFile string) (*Config, error) {
 
 		EmbeddingProvider: envOr("EMBEDDING_PROVIDER", "openai"),
 		EmbeddingModel:    envOr("EMBEDDING_MODEL", "text-embedding-3-small"),
+
+		BraveAPIKey:     os.Getenv("BRAVE_API_KEY"),
+		SerpAPIKey:      os.Getenv("SERP_API_KEY"),
+		FilesystemRoot:  envOr("FILESYSTEM_ROOT", "workspace"),
+		ToolMaxOutputKB: envInt("TOOL_MAX_OUTPUT_KB", 32),
+		ToolTimeoutSecs: envInt("TOOL_TIMEOUT_SECS", 30),
+		HTTPMaxBodyKB:   envInt("HTTP_MAX_BODY_KB", 256),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -82,6 +97,16 @@ func Load(envFile string) (*Config, error) {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+			return n
+		}
 	}
 	return fallback
 }
