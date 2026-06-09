@@ -16,6 +16,7 @@ import (
 	"github.com/devwithfarshi/painless-agent/internal/llm"
 	memorystore "github.com/devwithfarshi/painless-agent/internal/memory"
 	"github.com/devwithfarshi/painless-agent/internal/onboarding"
+	"github.com/devwithfarshi/painless-agent/internal/sandbox"
 	"github.com/devwithfarshi/painless-agent/internal/store"
 	"github.com/devwithfarshi/painless-agent/internal/tools"
 	"github.com/devwithfarshi/painless-agent/pkg/config"
@@ -24,8 +25,10 @@ import (
 )
 
 const systemPrompt = `You are a helpful AI assistant with access to tools.
-You can search the web, read and write files, make HTTP requests, and save information to memory.
-Be concise and direct. Use tools when they provide better or more current information than you have.`
+You can search the web, read and write files, make HTTP requests, save information to memory,
+execute code in an isolated Docker sandbox, control a headless browser, and interact with GitHub.
+Always use the appropriate tool rather than explaining how the user could do it themselves.
+Be concise and direct.`
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -101,6 +104,28 @@ func main() {
 	engine.Register(summarizer)
 	if memStore != nil {
 		engine.Register(tools.NewMemoryTool(memStore))
+	}
+
+	// Code executor: requires a running Docker daemon.
+	var dockerRunner *sandbox.Runner
+	if dr, err := sandbox.NewRunner(); err != nil {
+		log.Warn("docker unavailable — code_executor disabled", "error", err)
+	} else {
+		dockerRunner = dr
+		engine.Register(tools.NewCodeExecutorTool(dockerRunner, cfg.CodeExecTimeoutSecs))
+	}
+
+	// Browser tool: uses Docker CDP service if CHROME_CDP_URL is set, local Chrome otherwise.
+	browserTool := tools.NewBrowserTool(cfg.FilesystemRoot, cfg.ChromeCDPURL)
+	engine.Register(browserTool)
+	defer browserTool.Close()
+	if dockerRunner != nil {
+		defer dockerRunner.Close()
+	}
+
+	// GitHub tool: only if token is configured.
+	if cfg.GitHubToken != "" {
+		engine.Register(tools.NewGitHubTool(cfg.GitHubToken))
 	}
 
 	name := cfg.UserName
@@ -287,6 +312,18 @@ func formatCall(tc llm.ToolCall) string {
 		if c, ok := tc.Input["content"].(string); ok {
 			return fmt.Sprintf("memory_store(%q…)", truncate(c, 40))
 		}
+	case "code_executor":
+		lang, _ := tc.Input["language"].(string)
+		code, _ := tc.Input["code"].(string)
+		return fmt.Sprintf("code_executor(%s: %q…)", lang, truncate(code, 40))
+	case "browser":
+		op, _ := tc.Input["operation"].(string)
+		u, _ := tc.Input["url"].(string)
+		return fmt.Sprintf("browser(%s %s)", op, truncate(u, 50))
+	case "github":
+		op, _ := tc.Input["operation"].(string)
+		repo, _ := tc.Input["repo"].(string)
+		return fmt.Sprintf("github(%s %q)", op, repo)
 	}
 	return tc.Name + "(...)"
 }

@@ -13,28 +13,53 @@ import (
 
 // BrowserTool controls a headless Chromium instance via chromedp.
 // Each Execute call gets its own browser tab; the underlying Chrome process is shared.
+//
+// Two modes:
+//   - Local exec (cdpURL == ""): spawns a local Chrome/Chromium process.
+//   - Remote CDP (cdpURL != ""): connects to an existing Chrome via DevTools Protocol
+//     (e.g. the docker-compose `chrome` service on ws://localhost:9222).
+//
+// chromedp's built-in modifyURL automatically calls /json/version on the remote host
+// to resolve the full browser WebSocket URL, so a plain ws://host:port is enough.
 type BrowserTool struct {
 	allocCtx    context.Context
 	allocCancel context.CancelFunc
-	workspace   string // path for saving screenshots
+	workspace   string
+	mode        string // "local" or "remote:<url>"
 }
 
-func NewBrowserTool(workspace string) *BrowserTool {
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", true),
-		chromedp.Flag("no-sandbox", true),
-		chromedp.Flag("disable-gpu", true),
-		chromedp.Flag("disable-dev-shm-usage", true),
-	)
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+// NewBrowserTool creates a BrowserTool.
+// Pass cdpURL = "" to use a local Chrome installation.
+// Pass cdpURL = "ws://localhost:9222" (or http://) to use a remote Chrome container.
+func NewBrowserTool(workspace, cdpURL string) *BrowserTool {
+	var allocCtx context.Context
+	var allocCancel context.CancelFunc
+	mode := "local"
+
+	if cdpURL != "" {
+		// Remote Chrome — chromedp resolves the full browser WebSocket URL automatically.
+		allocCtx, allocCancel = chromedp.NewRemoteAllocator(context.Background(), cdpURL)
+		mode = "remote:" + cdpURL
+	} else {
+		opts := append(chromedp.DefaultExecAllocatorOptions[:],
+			chromedp.Flag("headless", true),
+			chromedp.Flag("no-sandbox", true),
+			chromedp.Flag("disable-gpu", true),
+			chromedp.Flag("disable-dev-shm-usage", true),
+		)
+		allocCtx, allocCancel = chromedp.NewExecAllocator(context.Background(), opts...)
+	}
+
 	return &BrowserTool{
 		allocCtx:    allocCtx,
 		allocCancel: allocCancel,
 		workspace:   workspace,
+		mode:        mode,
 	}
 }
 
-// Close shuts down the shared Chrome process.
+// Close shuts down the allocator. For local mode this kills the Chrome process;
+// for remote mode it just releases the context (the Docker container keeps running).
 func (t *BrowserTool) Close() {
 	if t.allocCancel != nil {
 		t.allocCancel()

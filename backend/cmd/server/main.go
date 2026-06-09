@@ -123,10 +123,14 @@ func main() {
 		log.Info("code_executor tool registered")
 	}
 
-	// Browser tool: requires Chrome/Chromium in PATH.
-	browserTool := tools.NewBrowserTool(cfg.FilesystemRoot)
+	// Browser tool: uses Docker CDP service if CHROME_CDP_URL is set, local Chrome otherwise.
+	browserTool := tools.NewBrowserTool(cfg.FilesystemRoot, cfg.ChromeCDPURL)
 	toolEngine.Register(browserTool)
-	log.Info("browser tool registered")
+	if cfg.ChromeCDPURL != "" {
+		log.Info("browser tool registered", "mode", "remote", "cdp_url", cfg.ChromeCDPURL)
+	} else {
+		log.Info("browser tool registered", "mode", "local-exec")
+	}
 
 	// GitHub tool: only registered when a token is configured.
 	if cfg.GitHubToken != "" {

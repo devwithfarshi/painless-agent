@@ -32,6 +32,19 @@ services:
       timeout: 3s
       retries: 5
 
+  chrome:
+    image: chromedp/headless-shell:latest
+    container_name: painless-agent-chrome
+    restart: always
+    shm_size: 256m
+    ports:
+      - "9222:9222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9222/json/version | grep -q webSocketDebuggerUrl"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   postgres_data:
   redis_data:

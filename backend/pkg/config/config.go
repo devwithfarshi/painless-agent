@@ -39,6 +39,12 @@ type Config struct {
 	DockerHost          string // Docker daemon socket; empty = DOCKER_HOST env / default
 	CodeExecTimeoutSecs int    // per-execution timeout for the sandbox (default: 30)
 
+	// Browser tool.
+	// When set, the browser tool connects to a remote Chrome via CDP instead of
+	// spawning a local Chrome process. Use the docker-compose chrome service:
+	//   CHROME_CDP_URL=ws://localhost:9222
+	ChromeCDPURL string
+
 	// GitHub tool.
 	GitHubToken string // personal access token with repo scope
 }
@@ -75,6 +81,8 @@ func Load(envFile string) (*Config, error) {
 
 		DockerHost:          os.Getenv("DOCKER_HOST"), // empty = default socket
 		CodeExecTimeoutSecs: envInt("CODE_EXEC_TIMEOUT_SECS", 30),
+
+		ChromeCDPURL: os.Getenv("CHROME_CDP_URL"),
 
 		GitHubToken: os.Getenv("GITHUB_TOKEN"),
 	}
