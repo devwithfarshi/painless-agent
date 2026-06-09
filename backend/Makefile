@@ -1,4 +1,4 @@
-.PHONY: up down run repl worker build tidy
+.PHONY: up down run repl worker build tidy dev
 
 up:
 	docker compose up -d
@@ -20,3 +20,7 @@ build:
 
 tidy:
 	go mod tidy
+
+# Start the Next.js frontend dev server (run from repo root: make dev).
+dev:
+	cd ../frontend && npm run dev

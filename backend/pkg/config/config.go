@@ -60,6 +60,21 @@ type Config struct {
 
 	// Asynq queue settings (Order 5).
 	QueueConcurrency int // number of concurrent worker goroutines; default 1
+
+	// HTTP API settings (Order 6).
+	HTTPAddr     string // listen address (default ":8080")
+	APIKey       string // if set, all API requests must include X-API-Key: <key>
+	CORSOrigins  string // comma-separated allowed origins (default "*")
+	RateLimitRPM int    // max requests per minute per IP (default 120; 0 = disabled)
+
+	// Additional LLM providers (Order 7).
+	GeminiAPIKey    string // Google Gemini API key (ai.google.dev)
+	OllamaBaseURL   string // Ollama base URL (default http://localhost:11434/v1)
+	OpenRouterAPIKey string // OpenRouter API key (openrouter.ai)
+
+	// Retry settings (Order 7).
+	// LLMMaxRetries is the number of times to retry transient provider errors.
+	LLMMaxRetries int // default 3
 }
 
 func Load(envFile string) (*Config, error) {
@@ -102,6 +117,16 @@ func Load(envFile string) (*Config, error) {
 		SkillMatchThreshold:       envFloat("SKILL_MATCH_THRESHOLD", 0.3),
 		ReflectionRatingThreshold: envInt("REFLECTION_RATING_THRESHOLD", 7),
 		QueueConcurrency:          envInt("QUEUE_CONCURRENCY", 1),
+
+		HTTPAddr:     envOr("HTTP_ADDR", ":8080"),
+		APIKey:       os.Getenv("API_KEY"),
+		CORSOrigins:  envOr("CORS_ORIGINS", "*"),
+		RateLimitRPM: envInt("RATE_LIMIT_RPM", 120),
+
+		GeminiAPIKey:    os.Getenv("GEMINI_API_KEY"),
+		OllamaBaseURL:   envOr("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+		OpenRouterAPIKey: os.Getenv("OPENROUTER_API_KEY"),
+		LLMMaxRetries:   envInt("LLM_MAX_RETRIES", 3),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -124,8 +149,18 @@ func Load(envFile string) (*Config, error) {
 	case "copilot":
 		// GitHub token is resolved at provider init via COPILOT_GITHUB_TOKEN / GH_TOKEN /
 		// GITHUB_TOKEN env vars, `gh auth token`, stored token, or device-code login.
+	case "gemini":
+		if cfg.GeminiAPIKey == "" {
+			return nil, fmt.Errorf("GEMINI_API_KEY is required when LLM_PROVIDER=gemini")
+		}
+	case "ollama":
+		// No key required; uses local Ollama instance at OllamaBaseURL.
+	case "openrouter":
+		if cfg.OpenRouterAPIKey == "" {
+			return nil, fmt.Errorf("OPENROUTER_API_KEY is required when LLM_PROVIDER=openrouter")
+		}
 	default:
-		return nil, fmt.Errorf("unknown LLM_PROVIDER %q (supported: openai, anthropic, copilot)", cfg.LLMProvider)
+		return nil, fmt.Errorf("unknown LLM_PROVIDER %q (supported: openai, anthropic, copilot, gemini, ollama, openrouter)", cfg.LLMProvider)
 	}
 
 	return cfg, nil

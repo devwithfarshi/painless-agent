@@ -6,10 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `painless-agent` is a self-hosted, autonomous AI agent platform in Go — a Hermes-style agent with persistent memory, tool use, task planning, skill learning, sandboxed code/browser execution, and long-running workflows streamed to a web dashboard. See `md/project-goal.md` for the vision and `md/development-flow.md` for the phased architecture plan (the authoritative design doc — read it before building any `internal/` package).
 
-**Current state:** Orders 1–5 complete, plus Copilot provider, first-run onboarding wizard, and terminal REPL. `cmd/server/main.go` wires onboarding → config → Postgres → pgvector → migrations → Redis → LLM provider → embedder → memory store → skill store → tool engine → TaskStore → ReflectionStore → Reflector → AgentRuntime → scheduler client. `cmd/worker/main.go` is a standalone Asynq worker that processes `agent:run` tasks from the queue. `cmd/repl/main.go` is an interactive chat loop with the same tool engine + memory + skill lookup. Set `AGENT_GOAL=<goal>` to enqueue a task; run `make worker` to process it.
+**Current state:** Orders 1–7 complete. `cmd/server/main.go` wires onboarding → config → Postgres → pgvector → migrations → Redis → event emitter → LLM provider (SwappableProvider) → embedder → memory store → skill store → tool engine → TaskStore → ReflectionStore → Reflector → AgentRuntime (with emitter) → scheduler client → HTTP server. The server now listens on `:8080` (configurable via `HTTP_ADDR`). `cmd/worker/main.go` is a standalone Asynq worker. `cmd/repl/main.go` is an interactive REPL. The frontend at `frontend/` is a Next.js + Tailwind + shadcn/ui app with dashboard, tasks, memory, and skills pages.
 
 Internal packages built so far:
-- `internal/llm` — `LLMProvider` interface; OpenAI, Anthropic, and **GitHub Copilot** providers; factory. Copilot uses device-code OAuth, Copilot API token exchange/caching, and the OpenAI-compatible `/chat/completions` endpoint. Key exported functions: `ResolveGitHubToken(ctx)`, `ExchangeCopilotToken(ctx, githubToken)`, `FetchCopilotModels(ctx, githubToken)`.
+- `internal/llm` — `LLMProvider` interface; OpenAI, Anthropic, **GitHub Copilot**, **Google Gemini**, **Ollama**, and **OpenRouter** providers; factory (`New`, `NewEmbedder`). All providers wrapped with `RetryProvider` (exponential backoff, 3 retries by default, on HTTP 429/5xx/timeout). `SwappableProvider` wraps any provider behind `sync/atomic` for hot-swap via `POST /api/config/provider`. Gemini uses `google.golang.org/genai v1.59.0`; Ollama and OpenRouter reuse the OpenAI SDK with custom base URLs. `NewGemini` ctx-based constructor; message conversion groups consecutive `RoleTool` messages into a single Gemini "user" content.
 - `internal/onboarding` — first-run wizard (`IsFirstRun`, `Run`, `LoadUserName`). Collects user name, provider, credentials interactively; writes `LLM_PROVIDER`/`LLM_MODEL`/API key back into `.env`; saves `~/.painless-agent/config.json`. Subsequent runs skip the wizard. Reset with `rm ~/.painless-agent/config.json`.
 - `internal/types` — `Task`/`TaskStep`/`PlanStep`/`Skill` (with `UsageCount int` and `CreatedAt time.Time`)/`SkillStep`
 - `internal/store` — `TaskStore`, `ToolLogStore` (writes `tool_logs` table), `ReflectionStore` (writes `reflections` table — `lessons_json` JSONB + `rating` 1–10)
@@ -19,9 +19,10 @@ Internal packages built so far:
 - `internal/sandbox` — `Runner` wraps the Docker client. `Run(ctx, RunOpts)` creates and starts a container enforcing `--network=none`, `--memory=256m`, `--cpus=0.5`. `Wait` blocks until exit or timeout. `Logs` demultiplexes stdout/stderr via `stdcopy.StdCopy`. `Remove` force-removes. Image name is always derived from the internal `supportedLanguages` map in `code_executor.go`, never from user input.
 - `internal/skills` — `SkillStore` interface (`Match`, `Save`, `IncrementUsage`, `List`, `Get`, `Delete`) + `pgSkillStore`: `Match` embeds goal and does `ORDER BY embedding <=> $1::vector LIMIT 1` — returns nil if distance > threshold; `Save` embeds description and upserts on `name`; same `pgvector.NewVector().String()` + `::vector` pattern as memory.
 - `internal/reflection` — `Reflector` implements `agent.Reflector`. `Reflect(ctx, task, steps)` calls the LLM with an `extract_reflection` tool to get `{lessons, rating, promoteToSkill, skillName, skillSteps}`; saves a `reflections` row; if `rating >= threshold && promoteToSkill`, calls `skillStore.Save` to promote the workflow.
-- `internal/scheduler` — Asynq-backed `Client` (enqueues `agent:run` tasks to Redis) and `Server` (processes the queue, calls `runtime.Run`). `NewClient(redisURL)` / `NewServer(redisURL, runtime, concurrency)` — both parse the Redis URL via `asynq.ParseRedisURI`.
-
-`internal/streaming` is still empty — wired via interfaces in the runtime. `frontend/` and `infra/scripts/*.sh` are stubs.
+- `internal/scheduler` — Asynq-backed `Client` (`Enqueue`, `EnqueueTask` with pre-created task ID) and `Server`. `Runner` interface now includes `RunTask(ctx, taskID, goal)`. `TaskPayload` has an optional `task_id` field — when present, the worker calls `RunTask` instead of `Run` to reuse the pre-created DB row.
+- `internal/streaming` — `Emitter`: fans events to in-process `chan Event` subscribers + Redis pub/sub channel `task:<id>`. `Subscribe(taskID)` → in-process (for inline runs). `SubscribeRedis(ctx, taskID)` → Redis pub/sub (for worker-process SSE). `MergeChannels` merges two event channels.
+- `internal/api` — chi-based HTTP API. `NewRouter(cfg, handlers, log)` wires all routes. Middleware: `Logging`, `Auth` (X-API-Key / Bearer), `CORS`, `RateLimit` (httprate). Handlers: tasks CRUD + SSE stream, memory search, skills CRUD, config provider, health.
+- `frontend/` — Next.js 16 + Tailwind v4 + shadcn/ui. Pages: `/dashboard`, `/tasks`, `/tasks/[id]`, `/memory`, `/skills`. Components: `AgentFeed` (SSE via `useTaskStream`), `TaskCard`, `StepTimeline`, `MemoryCard`. API client at `lib/api.ts`; SSE hook at `lib/sse.ts`. `NEXT_PUBLIC_API_URL` env var (default `http://localhost:8080`).
 
 ## Commands
 
@@ -35,12 +36,13 @@ make worker  # go run ./cmd/worker   (processes agent:run tasks from the Asynq q
 make repl    # go run ./cmd/repl     (interactive chat with the agent)
 make build   # go build -o bin/server ./cmd/server && go build -o bin/worker ./cmd/worker
 make tidy    # go mod tidy
+make dev     # cd ../frontend && npm run dev  (Next.js dev server on :3000)
 
 go test ./...                        # all tests
 go test ./internal/agent/... -run TestName -v   # single package / single test
 ```
 
-Copy `.env.example` → `.env` before `make run` (only `DATABASE_URL`/`REDIS_URL` are required — the first-run wizard fills in LLM settings). Go 1.26.
+Copy `.env.example` → `.env` before `make run` (only `DATABASE_URL`/`REDIS_URL` are required — the first-run wizard fills in LLM settings). For the frontend, copy `frontend/.env.local.example` → `frontend/.env.local`. Go 1.26.
 
 ## Architecture & conventions
 
@@ -84,8 +86,34 @@ Copy `.env.example` → `.env` before `make run` (only `DATABASE_URL`/`REDIS_URL
 
 - **Dependency injection pattern (Order 2):** `AgentRuntime` accepts `MemoryStore`, `SkillStore`, `Reflector`, `ToolEngine`, `ToolLogStore` as interfaces defined in `internal/agent/runtime.go`. No-op implementations live there too. Concrete implementations are wired from `cmd/server/main.go` via `runtime.With*` methods. Never change the `Run` signature; always add capability via the `With*` methods.
 
-- **REPL pattern:** `cmd/repl/main.go` is an interactive terminal chat loop. It uses the same tool engine and memory store as the server but skips the planning phase — direct chat with tool use (Think→Act→Observe, max 10 iterations). Uses `github.com/chzyer/readline` for arrow keys, history, and Ctrl+C handling. Session UUID links all tool_logs; each response is stored to memory. Memory search enriches each prompt with the 3 most relevant past entries.
+- **Skill store patterns (Order 5):** `skills.NewPgSkillStore(pool, embedder, threshold)` returns a `SkillStore`. `Match` embeds the goal, queries `ORDER BY embedding <=> $1::vector LIMIT 1`, and returns nil if distance > threshold. `Save` embeds the skill description and upserts on `name` (idempotent). Both use the same `pgvector.NewVector(v).String()` + `::vector` cast as the memory store. Skill store is skipped gracefully if the embedder is unavailable.
+
+- **Reflection patterns (Order 5):** `reflection.New(provider, reflectionStore, skillStore, ratingThreshold)` returns a `*Reflector` that satisfies `agent.Reflector`. `Reflect(ctx, task, steps)` calls the LLM with an `extract_reflection` tool (structured JSON output), saves a `reflections` row, and calls `skillStore.Save` when `rating >= ratingThreshold && promoteToSkill`. Reflection is non-fatal — errors are returned but the task is still marked complete.
+
+- **Scheduler patterns (Order 5):** `scheduler.NewClient(redisURL)` enqueues `agent:run` tasks; `scheduler.NewServer(redisURL, runtime, concurrency)` processes them. Both parse the Redis URI via `asynq.ParseRedisURI`. The server's `AGENT_GOAL` path enqueues via the client (falls back to inline run if enqueue fails). `cmd/worker/main.go` is the long-running consumer — wire everything identically to the server then call `srv.Start()` (blocks until shutdown).
+
+- **Config additions (Order 5):** `SkillMatchThreshold` (default 0.3 — cosine distance ceiling; lower = stricter), `ReflectionRatingThreshold` (default 7 — minimum rating 1–10 to promote to skill), `QueueConcurrency` (default 1 — worker goroutines). All three are optional with sensible defaults.
+
+- **Config additions (Order 6):** `HTTPAddr` (default `:8080`), `APIKey` (optional — if set, all API requests need `X-API-Key: <key>` or `Authorization: Bearer <key>`), `CORSOrigins` (default `*`), `RateLimitRPM` (default 120 — per-IP; 0 = disabled).
+
+- **Streaming patterns (Order 6):** `streaming.New(rdb)` creates the emitter. `Emit(taskID, type, payload)` fans to in-process subscribers and publishes to Redis `task:<id>`. `Subscribe(taskID)` returns `(chan Event, cancelFn)` for same-process delivery. `SubscribeRedis(ctx, taskID)` returns a channel fed from Redis pub/sub (for SSE when the runtime runs in a separate worker process). `MergeChannels(ctx, a, b)` merges two channels for the SSE handler. The `EventEmitter` interface added to `agent.AgentRuntime` (wired via `WithEmitter`). `noopEmitter{}` default. Events: `task_started`, `step_started`, `tool_called`, `step_done`, `step_failed`, `task_done`, `task_failed`.
+
+- **API patterns (Order 6):** `api.NewRouter(cfg, handlers, log)` returns a chi router. `handlers.Handlers` struct holds `Tasks`, `Skills`, `Memory`, `Scheduler`, `Emitter`, `Pool`, `RDB`. SSE handler (`GET /api/tasks/:id/stream`) subscribes to both in-process and Redis channels, merges them, writes `data: <json>\n\n` events, closes on `task_done`/`task_failed` or client disconnect. `POST /api/tasks` pre-creates the task in DB, enqueues via `schedClient.EnqueueTask(ctx, taskID, goal)` so the returned ID is usable immediately. `scheduler.Client.EnqueueTask` adds `task_id` to the Asynq payload; `processTask` calls `runtime.RunTask(ctx, taskID, goal)` when `task_id` is present.
+
+- **Frontend patterns (Order 6):** `lib/api.ts` exports `api.{tasks,memory,skills,health}` REST client. `lib/sse.ts` exports `useTaskStream(taskId)` hook that opens an `EventSource` and returns `{events, connected, done, reset}`. Pages use server components for initial data (tasks list, skills list) and client components for interactive parts (task creation, SSE feed). `NEXT_PUBLIC_API_URL` defaults to `http://localhost:8080`.
+
+- **REPL pattern:** `cmd/repl/main.go` is an interactive terminal chat loop. It uses the same tool engine, memory store, and skill store as the server but skips the planning phase — direct chat with tool use (Think→Act→Observe, max 10 iterations). Uses `github.com/chzyer/readline` for arrow keys, history, and Ctrl+C handling. Session UUID links all tool_logs; each response is stored to memory. Memory search enriches each prompt with the 3 most relevant past entries. Skill lookup runs on every message — prints `★ skill: <name>` and injects the skill steps when a match is found.
+
+- **New providers (Order 7):** Six providers total: `openai`, `anthropic`, `copilot`, `gemini`, `ollama`, `openrouter`. Gemini uses `google.golang.org/genai v1.59.0` — `genai.NewClient(ctx, &ClientConfig{APIKey, Backend: BackendGeminiAPI})`, `client.Models.GenerateContent`. Ollama and OpenRouter reuse `OpenAIProvider` with custom base URLs (`option.WithBaseURL`). OpenRouter also requires `HTTP-Referer` and `X-Title` headers. Default models: gemini=`gemini-2.0-flash`, ollama=`llama3.2`, openrouter=`meta-llama/llama-3.3-70b-instruct`. Config keys: `GEMINI_API_KEY`, `OLLAMA_BASE_URL` (default `http://localhost:11434/v1`), `OPENROUTER_API_KEY`.
+
+- **Retry patterns (Order 7):** `llm.WithRetry(p, maxRetries)` wraps any `LLMProvider`. Retries on `HTTP 429`, `HTTP 500`, `HTTP 502`, `HTTP 503`, `HTTP 504`, `connection refused`, `EOF`, `timeout`. `math/rand/v2.N` for jitter. Exponential base (1s, 2s, 4s…, capped at 30s). `context.Canceled`/`context.DeadlineExceeded` are not retried. `llm.New(cfg)` always wraps with retry; controlled by `LLM_MAX_RETRIES` (default 3).
+
+- **Hot-swap patterns (Order 7):** `llm.NewSwappable(provider)` wraps any `LLMProvider` behind `sync/atomic.Pointer[LLMProvider]`. `Swap(p)` atomically replaces the provider; in-flight calls finish against the old provider. `cmd/server/main.go` wraps the initial provider in `SwappableProvider` before passing to runtime, planner, reflector, and summarizer — all share the same pointer so a single `Swap` call affects all. `handlers.Handlers` now has `Provider *llm.SwappableProvider` and `Cfg *config.Config`; `SetProvider` builds a new provider from the request body and calls `Provider.Swap`. No restart required.
+
+- **ContextManager fix (Order 7):** `ContextManager.Window()` now drops messages at turn boundaries (user → next user) instead of one at a time, preventing orphaned `RoleTool` messages from appearing at the start of the context window. This fixes `HTTP 400: messages with role 'tool' must be a response to a preceeding message with 'tool_calls'` that occurred when browser-tool results flooded the context. Token estimate now also counts tool call name lengths.
+
+- **Config additions (Order 7):** `GeminiAPIKey`, `OllamaBaseURL` (default `http://localhost:11434/v1`), `OpenRouterAPIKey`, `LLMMaxRetries` (default 3). Validation extended to new providers. Onboarding wizard updated to offer all 6 providers including Gemini, Ollama, OpenRouter setup steps.
 
 ## Active Plan
 Always read ~/.claude/plans/read-md-project-goal-md-and-md-developme-gentle-neumann.md at the start of each session.
-Current progress: Orders 1–4 complete (plus Copilot provider, onboarding wizard, and terminal REPL added). Starting Order 5.
+Current progress: Orders 1–7 complete. Starting Order 8.

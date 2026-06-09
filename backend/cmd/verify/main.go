@@ -72,7 +72,8 @@ func main() {
 	ctx := context.Background()
 	fmt.Println("\n╔══════════════════════════════════════════════════════════╗")
 	fmt.Println("║     painless-agent  end-to-end verification              ║")
-	fmt.Println("╚══════════════════════════════════════════════════════════╝\n")
+	fmt.Println("╚══════════════════════════════════════════════════════════╝")
+	fmt.Println()
 
 	// Load .env / onboarding.
 	if name := onboarding.LoadUserName(); name != "" && os.Getenv("AGENT_USER_NAME") == "" {

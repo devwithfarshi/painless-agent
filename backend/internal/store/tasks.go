@@ -36,12 +36,16 @@ func (s *TaskStore) CreateTask(ctx context.Context, goal string) (types.Task, er
 func (s *TaskStore) GetTask(ctx context.Context, id uuid.UUID) (types.Task, error) {
 	var t types.Task
 	var planJSON []byte
+	var errMsg *string
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, goal, status, plan_json, created_at, updated_at FROM tasks WHERE id = $1`,
+		`SELECT id, goal, status, plan_json, error_msg, created_at, updated_at FROM tasks WHERE id = $1`,
 		id,
-	).Scan(&t.ID, &t.Goal, &t.Status, &planJSON, &t.CreatedAt, &t.UpdatedAt)
+	).Scan(&t.ID, &t.Goal, &t.Status, &planJSON, &errMsg, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return t, fmt.Errorf("get task %s: %w", id, err)
+	}
+	if errMsg != nil {
+		t.ErrorMsg = *errMsg
 	}
 	if len(planJSON) > 0 {
 		if err := json.Unmarshal(planJSON, &t.Plan); err != nil {
@@ -53,7 +57,7 @@ func (s *TaskStore) GetTask(ctx context.Context, id uuid.UUID) (types.Task, erro
 
 func (s *TaskStore) ListTasks(ctx context.Context) ([]types.Task, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, goal, status, plan_json, created_at, updated_at FROM tasks ORDER BY created_at DESC`,
+		`SELECT id, goal, status, plan_json, error_msg, created_at, updated_at FROM tasks ORDER BY created_at DESC`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list tasks: %w", err)
@@ -64,8 +68,12 @@ func (s *TaskStore) ListTasks(ctx context.Context) ([]types.Task, error) {
 	for rows.Next() {
 		var t types.Task
 		var planJSON []byte
-		if err := rows.Scan(&t.ID, &t.Goal, &t.Status, &planJSON, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		var errMsg *string
+		if err := rows.Scan(&t.ID, &t.Goal, &t.Status, &planJSON, &errMsg, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan task row: %w", err)
+		}
+		if errMsg != nil {
+			t.ErrorMsg = *errMsg
 		}
 		if len(planJSON) > 0 {
 			_ = json.Unmarshal(planJSON, &t.Plan)
@@ -82,6 +90,17 @@ func (s *TaskStore) UpdateStatus(ctx context.Context, id uuid.UUID, status types
 	)
 	if err != nil {
 		return fmt.Errorf("update task status: %w", err)
+	}
+	return nil
+}
+
+func (s *TaskStore) SetError(ctx context.Context, id uuid.UUID, errMsg string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE tasks SET error_msg = $1 WHERE id = $2`,
+		errMsg, id,
+	)
+	if err != nil {
+		return fmt.Errorf("set task error: %w", err)
 	}
 	return nil
 }

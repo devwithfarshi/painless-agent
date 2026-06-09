@@ -30,6 +30,7 @@ type Task struct {
 	Goal      string
 	Status    TaskStatus
 	Plan      []PlanStep
+	ErrorMsg  string    // set when Status is failed
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }

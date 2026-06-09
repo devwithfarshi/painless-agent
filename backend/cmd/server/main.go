@@ -2,11 +2,15 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/devwithfarshi/painless-agent/internal/agent"
+	"github.com/devwithfarshi/painless-agent/internal/api"
+	"github.com/devwithfarshi/painless-agent/internal/api/handlers"
 	"github.com/devwithfarshi/painless-agent/internal/llm"
 	memorystore "github.com/devwithfarshi/painless-agent/internal/memory"
 	"github.com/devwithfarshi/painless-agent/internal/onboarding"
@@ -15,6 +19,7 @@ import (
 	"github.com/devwithfarshi/painless-agent/internal/scheduler"
 	"github.com/devwithfarshi/painless-agent/internal/skills"
 	"github.com/devwithfarshi/painless-agent/internal/store"
+	"github.com/devwithfarshi/painless-agent/internal/streaming"
 	"github.com/devwithfarshi/painless-agent/internal/tools"
 	"github.com/devwithfarshi/painless-agent/pkg/config"
 	"github.com/devwithfarshi/painless-agent/pkg/db"
@@ -75,12 +80,16 @@ func main() {
 	defer rdb.Close()
 	log.Info("connected to redis")
 
-	// LLM chat provider.
-	provider, err := llm.New(cfg)
+	// Event emitter — wired into both the runtime and the SSE HTTP handler.
+	emitter := streaming.New(rdb)
+
+	// LLM chat provider — wrapped in SwappableProvider for runtime hot-swap via POST /api/config/provider.
+	rawProvider, err := llm.New(cfg)
 	if err != nil {
 		log.Error("init llm provider", "error", err)
 		os.Exit(1)
 	}
+	provider := llm.NewSwappable(rawProvider)
 	if cfg.UserName != "" {
 		log.Info("llm provider ready", "provider", cfg.LLMProvider, "model", provider.Model(), "user", cfg.UserName)
 	} else {
@@ -88,7 +97,6 @@ func main() {
 	}
 
 	// Embedder (always OpenAI for 1536-dim vectors).
-	// pgMem satisfies both memory.MemoryStore and agent.MemoryStore (same method set).
 	var pgMem memorystore.MemoryStore
 	embedder, embErr := llm.NewEmbedder(cfg)
 	if embErr != nil {
@@ -126,7 +134,7 @@ func main() {
 		log.Info("code_executor tool registered")
 	}
 
-	// Browser tool: uses Docker CDP service if CHROME_CDP_URL is set, local Chrome otherwise.
+	// Browser tool.
 	browserTool := tools.NewBrowserTool(cfg.FilesystemRoot, cfg.ChromeCDPURL)
 	toolEngine.Register(browserTool)
 	if cfg.ChromeCDPURL != "" {
@@ -135,7 +143,7 @@ func main() {
 		log.Info("browser tool registered", "mode", "local-exec")
 	}
 
-	// GitHub tool: only registered when a token is configured.
+	// GitHub tool.
 	if cfg.GitHubToken != "" {
 		toolEngine.Register(tools.NewGitHubTool(cfg.GitHubToken))
 		log.Info("github tool registered")
@@ -145,7 +153,7 @@ func main() {
 
 	log.Info("tool engine ready", "tools", len(toolEngine.Definitions()))
 
-	// Skill store: requires embedder; skipped gracefully if unavailable.
+	// Skill store.
 	var skillStore skills.SkillStore
 	if embedder != nil {
 		skillStore = skills.NewPgSkillStore(pool, embedder, cfg.SkillMatchThreshold)
@@ -162,12 +170,12 @@ func main() {
 		log.Info("reflector ready", "rating_threshold", cfg.ReflectionRatingThreshold)
 	}
 
-	// Agent runtime — wire all dependencies.
+	// Agent runtime — wire all dependencies including the event emitter.
 	runtime := agent.New(provider, taskStore, log, agent.DefaultRuntimeConfig()).
 		WithTools(toolEngine).
-		WithToolLogs(toolLogStore)
+		WithToolLogs(toolLogStore).
+		WithEmitter(emitter)
 	if pgMem != nil {
-		// pgMem implements agent.MemoryStore (same method set — structural typing).
 		runtime = runtime.WithMemory(pgMem)
 	}
 	if skillStore != nil {
@@ -177,7 +185,7 @@ func main() {
 		runtime = runtime.WithReflector(reflector)
 	}
 
-	// Scheduler client: used by the HTTP server (Order 6) and AGENT_GOAL path.
+	// Scheduler client.
 	schedClient, schedErr := scheduler.NewClient(cfg.RedisURL)
 	if schedErr != nil {
 		log.Warn("scheduler client unavailable — tasks will run inline", "error", schedErr)
@@ -186,7 +194,35 @@ func main() {
 		log.Info("scheduler client ready")
 	}
 
-	// Debug path: set AGENT_GOAL to run a single task synchronously and exit.
+	// HTTP API server.
+	h := &handlers.Handlers{
+		Tasks:     taskStore,
+		Skills:    skillStore,
+		Memory:    pgMem,
+		Scheduler: schedClient,
+		Emitter:   emitter,
+		Pool:      pool,
+		RDB:       rdb,
+		Provider:  provider,
+		Cfg:       cfg,
+	}
+	router := api.NewRouter(cfg, h, log)
+	srv := &http.Server{
+		Addr:         cfg.HTTPAddr,
+		Handler:      router,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 0, // 0 = no timeout (needed for SSE streams)
+		IdleTimeout:  120 * time.Second,
+	}
+
+	go func() {
+		log.Info("http server listening", "addr", cfg.HTTPAddr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("http server error", "error", err)
+		}
+	}()
+
+	// Debug path: set AGENT_GOAL to run a single task on startup.
 	if goal := os.Getenv("AGENT_GOAL"); goal != "" {
 		log.Info("running goal", "goal", goal)
 		if schedClient != nil {
@@ -195,7 +231,6 @@ func main() {
 				log.Warn("enqueue failed — falling back to inline run", "error", err)
 				if err := runtime.Run(ctx, goal); err != nil {
 					log.Error("agent run failed", "error", err)
-					os.Exit(1)
 				}
 			} else {
 				log.Info("goal enqueued — run 'make worker' to process it", "task_id", info.ID)
@@ -203,19 +238,20 @@ func main() {
 		} else {
 			if err := runtime.Run(ctx, goal); err != nil {
 				log.Error("agent run failed", "error", err)
-				os.Exit(1)
 			}
 		}
-		log.Info("agent run complete")
-		return
 	}
 
-	log.Info("infrastructure ready — set AGENT_GOAL=<goal> to enqueue a task; run 'make worker' to process it (HTTP server arrives in Order 6)")
-
+	// Graceful shutdown.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	log.Info("shutting down")
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutCtx)
+
 	browserTool.Close()
 	if dockerRunner != nil {
 		_ = dockerRunner.Close()

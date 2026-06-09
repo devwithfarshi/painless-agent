@@ -41,6 +41,11 @@ type ToolLogStore interface {
 	Log(ctx context.Context, taskID, stepID uuid.UUID, toolName string, input map[string]any, output string, durationMs int) error
 }
 
+// EventEmitter broadcasts runtime events to SSE subscribers (internal/streaming).
+type EventEmitter interface {
+	Emit(taskID uuid.UUID, eventType string, payload any)
+}
+
 // AgentRuntime orchestrates the plan→think→act→observe loop for a goal.
 type AgentRuntime struct {
 	provider  llm.LLMProvider
@@ -51,6 +56,7 @@ type AgentRuntime struct {
 	reflector Reflector
 	tools     ToolEngine
 	toolLogs  ToolLogStore
+	emitter   EventEmitter
 	log       *slog.Logger
 }
 
@@ -73,6 +79,7 @@ func New(provider llm.LLMProvider, tasks *store.TaskStore, log *slog.Logger, cfg
 		reflector: noopReflect{},
 		tools:     noopTools{},
 		toolLogs:  noopToolLogs{},
+		emitter:   noopEmitter{},
 		log:       log,
 	}
 }
@@ -96,26 +103,54 @@ func (r *AgentRuntime) WithTools(t ToolEngine) *AgentRuntime {
 // WithToolLogs wires in the tool log store (called by Order 3 bootstrap).
 func (r *AgentRuntime) WithToolLogs(tl ToolLogStore) *AgentRuntime { r.toolLogs = tl; return r }
 
-// Run executes the full agent loop for goal: create task → plan → execute → reflect.
+// WithEmitter wires in the event emitter (called by Order 6 bootstrap).
+func (r *AgentRuntime) WithEmitter(e EventEmitter) *AgentRuntime { r.emitter = e; return r }
+
+// Run creates a new task for goal and executes the full agent loop.
 func (r *AgentRuntime) Run(ctx context.Context, goal string) error {
 	task, err := r.tasks.CreateTask(ctx, goal)
 	if err != nil {
 		return fmt.Errorf("create task: %w", err)
 	}
-	r.log.Info("task created", "task_id", task.ID, "goal", goal)
+	return r.runTask(ctx, task)
+}
+
+// RunTask executes the agent loop for a pre-existing task (used by the HTTP API
+// worker path where the task is created before enqueueing).
+func (r *AgentRuntime) RunTask(ctx context.Context, taskID uuid.UUID, goal string) error {
+	task, err := r.tasks.GetTask(ctx, taskID)
+	if err != nil {
+		// Fall back to creating a new task if the ID was not pre-created.
+		r.log.Warn("pre-created task not found, creating new", "task_id", taskID, "error", err)
+		newTask, err2 := r.tasks.CreateTask(ctx, goal)
+		if err2 != nil {
+			return fmt.Errorf("create fallback task: %w", err2)
+		}
+		task = newTask
+	}
+	return r.runTask(ctx, task)
+}
+
+// runTask is the shared implementation for Run and RunTask.
+func (r *AgentRuntime) runTask(ctx context.Context, task types.Task) error {
+	r.log.Info("task created", "task_id", task.ID, "goal", task.Goal)
 
 	if err := r.tasks.UpdateStatus(ctx, task.ID, types.TaskStatusRunning); err != nil {
 		return fmt.Errorf("set task running: %w", err)
 	}
+	r.emitter.Emit(task.ID, "task_started", map[string]any{"goal": task.Goal})
 
 	// Pull relevant memory context and matching skill (noops until Order 3/5).
 	memCtx, _ := r.memory.RecentContext(ctx, task.ID, 5)
-	skill, _ := r.skills.Match(ctx, goal)
+	skill, _ := r.skills.Match(ctx, task.Goal)
 
 	// Plan the goal into steps.
-	planSteps, err := r.planner.Plan(ctx, goal, memCtx, skill)
+	planSteps, err := r.planner.Plan(ctx, task.Goal, memCtx, skill)
 	if err != nil {
+		r.log.Error("plan failed", "task_id", task.ID, "error", err)
 		_ = r.tasks.UpdateStatus(ctx, task.ID, types.TaskStatusFailed)
+		_ = r.tasks.SetError(ctx, task.ID, err.Error())
+		r.emitter.Emit(task.ID, "task_failed", map[string]any{"error": err.Error()})
 		return fmt.Errorf("plan: %w", err)
 	}
 	r.log.Info("plan ready", "task_id", task.ID, "steps", len(planSteps))
@@ -138,7 +173,7 @@ func (r *AgentRuntime) Run(ctx context.Context, goal string) error {
 	ctxMgr := NewContextManager(8000)
 	ctxMgr.Add(llm.Message{
 		Role:    llm.RoleSystem,
-		Content: executionSystemPrompt(goal),
+		Content: executionSystemPrompt(task.Goal),
 	})
 
 	for i, step := range dbSteps {
@@ -149,6 +184,11 @@ func (r *AgentRuntime) Run(ctx context.Context, goal string) error {
 		}
 
 		r.log.Info("executing step", "step", i+1, "step_id", step.ID, "description", step.Description)
+		r.emitter.Emit(task.ID, "step_started", map[string]any{
+			"step_id":     step.ID,
+			"step_index":  i + 1,
+			"description": step.Description,
+		})
 
 		if err := r.tasks.UpdateStep(ctx, step.ID, types.StepStatusRunning, ""); err != nil {
 			return fmt.Errorf("mark step running: %w", err)
@@ -162,6 +202,10 @@ func (r *AgentRuntime) Run(ctx context.Context, goal string) error {
 		output, err := r.executeStep(ctx, task, step, ctxMgr)
 		if err != nil {
 			_ = r.tasks.UpdateStep(ctx, step.ID, types.StepStatusFailed, err.Error())
+			r.emitter.Emit(task.ID, "step_failed", map[string]any{
+				"step_id": step.ID,
+				"error":   err.Error(),
+			})
 			r.log.Error("step failed", "step_id", step.ID, "error", err)
 			continue
 		}
@@ -169,6 +213,11 @@ func (r *AgentRuntime) Run(ctx context.Context, goal string) error {
 		if err := r.tasks.UpdateStep(ctx, step.ID, types.StepStatusCompleted, output); err != nil {
 			return fmt.Errorf("persist step output: %w", err)
 		}
+
+		r.emitter.Emit(task.ID, "step_done", map[string]any{
+			"step_id": step.ID,
+			"output":  output,
+		})
 
 		// Store step result in memory.
 		_ = r.memory.Store(ctx, output, nil, task.ID)
@@ -183,6 +232,7 @@ func (r *AgentRuntime) Run(ctx context.Context, goal string) error {
 	if err := r.tasks.UpdateStatus(ctx, task.ID, types.TaskStatusCompleted); err != nil {
 		return fmt.Errorf("mark task complete: %w", err)
 	}
+	r.emitter.Emit(task.ID, "task_done", map[string]any{"task_id": task.ID})
 	r.log.Info("task complete", "task_id", task.ID)
 	return nil
 }
@@ -224,6 +274,12 @@ func (r *AgentRuntime) executeStep(ctx context.Context, task types.Task, step ty
 			if execErr != nil {
 				result = fmt.Sprintf("tool %q unavailable: %s", tc.Name, execErr)
 			}
+
+			r.emitter.Emit(task.ID, "tool_called", map[string]any{
+				"step_id":  step.ID,
+				"tool":     tc.Name,
+				"duration": durationMs,
+			})
 
 			_ = r.toolLogs.Log(ctx, task.ID, step.ID, tc.Name, tc.Input, result, durationMs)
 
@@ -278,3 +334,7 @@ type noopToolLogs struct{}
 func (noopToolLogs) Log(_ context.Context, _, _ uuid.UUID, _ string, _ map[string]any, _ string, _ int) error {
 	return nil
 }
+
+type noopEmitter struct{}
+
+func (noopEmitter) Emit(_ uuid.UUID, _ string, _ any) {}

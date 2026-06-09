@@ -13,6 +13,7 @@ import (
 	"github.com/devwithfarshi/painless-agent/internal/scheduler"
 	"github.com/devwithfarshi/painless-agent/internal/skills"
 	"github.com/devwithfarshi/painless-agent/internal/store"
+	"github.com/devwithfarshi/painless-agent/internal/streaming"
 	"github.com/devwithfarshi/painless-agent/internal/tools"
 	"github.com/devwithfarshi/painless-agent/pkg/config"
 	"github.com/devwithfarshi/painless-agent/pkg/db"
@@ -68,6 +69,9 @@ func main() {
 	}
 	defer rdb.Close()
 	log.Info("redis ready")
+
+	// Event emitter: publishes to Redis so the HTTP server can deliver SSE to clients.
+	emitter := streaming.New(rdb)
 
 	provider, err := llm.New(cfg)
 	if err != nil {
@@ -136,7 +140,8 @@ func main() {
 
 	runtime := agent.New(provider, taskStore, log, agent.DefaultRuntimeConfig()).
 		WithTools(toolEngine).
-		WithToolLogs(toolLogStore)
+		WithToolLogs(toolLogStore).
+		WithEmitter(emitter)
 	if pgMem != nil {
 		runtime = runtime.WithMemory(pgMem)
 	}

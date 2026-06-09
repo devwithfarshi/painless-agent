@@ -7,8 +7,17 @@ import (
 	"github.com/devwithfarshi/painless-agent/pkg/config"
 )
 
-// New returns the chat LLM provider selected by cfg.LLMProvider.
+// New returns the chat LLM provider selected by cfg.LLMProvider, wrapped with retry.
 func New(cfg *config.Config) (LLMProvider, error) {
+	p, err := newProvider(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return WithRetry(p, cfg.LLMMaxRetries), nil
+}
+
+// newProvider constructs the raw provider without retry wrapping.
+func newProvider(cfg *config.Config) (LLMProvider, error) {
 	switch cfg.LLMProvider {
 	case "openai":
 		if cfg.OpenAIAPIKey == "" {
@@ -41,8 +50,35 @@ func New(cfg *config.Config) (LLMProvider, error) {
 		}
 		return NewCopilot(githubToken, model), nil
 
+	case "gemini":
+		if cfg.GeminiAPIKey == "" {
+			return nil, fmt.Errorf("GEMINI_API_KEY is required when LLM_PROVIDER=gemini")
+		}
+		model := cfg.LLMModel
+		if model == "" {
+			model = "gemini-2.0-flash"
+		}
+		return NewGemini(context.Background(), cfg.GeminiAPIKey, model)
+
+	case "ollama":
+		model := cfg.LLMModel
+		if model == "" {
+			model = "llama3.2"
+		}
+		return NewOllama(cfg.OllamaBaseURL, model), nil
+
+	case "openrouter":
+		if cfg.OpenRouterAPIKey == "" {
+			return nil, fmt.Errorf("OPENROUTER_API_KEY is required when LLM_PROVIDER=openrouter")
+		}
+		model := cfg.LLMModel
+		if model == "" {
+			model = "meta-llama/llama-3.3-70b-instruct"
+		}
+		return NewOpenRouter(cfg.OpenRouterAPIKey, model), nil
+
 	default:
-		return nil, fmt.Errorf("unknown LLM_PROVIDER %q (supported: openai, anthropic, copilot)", cfg.LLMProvider)
+		return nil, fmt.Errorf("unknown LLM_PROVIDER %q (supported: openai, anthropic, copilot, gemini, ollama, openrouter)", cfg.LLMProvider)
 	}
 }
 

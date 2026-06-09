@@ -5,19 +5,23 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 )
 
 const TaskTypeAgentRun = "agent:run"
 
 // TaskPayload is the JSON body of an agent:run task.
+// TaskID is optionally set by the HTTP API so the task is pre-created in the DB.
 type TaskPayload struct {
-	Goal string `json:"goal"`
+	Goal   string `json:"goal"`
+	TaskID string `json:"task_id,omitempty"`
 }
 
 // Runner is the minimal interface the scheduler needs from the agent runtime.
 type Runner interface {
 	Run(ctx context.Context, goal string) error
+	RunTask(ctx context.Context, taskID uuid.UUID, goal string) error
 }
 
 // Client wraps asynq.Client for enqueueing agent tasks.
@@ -34,9 +38,19 @@ func NewClient(redisURL string) (*Client, error) {
 	return &Client{client: asynq.NewClient(opt)}, nil
 }
 
-// Enqueue submits a one-off agent run task. Returns task info on success.
+// Enqueue submits a one-off agent run task (no pre-created task ID).
 func (c *Client) Enqueue(ctx context.Context, goal string, opts ...asynq.Option) (*asynq.TaskInfo, error) {
-	payload, err := json.Marshal(TaskPayload{Goal: goal})
+	return c.enqueue(ctx, TaskPayload{Goal: goal}, opts...)
+}
+
+// EnqueueTask submits a task that already exists in the DB.
+// The worker will call RunTask with the given taskID instead of creating a new one.
+func (c *Client) EnqueueTask(ctx context.Context, taskID uuid.UUID, goal string, opts ...asynq.Option) (*asynq.TaskInfo, error) {
+	return c.enqueue(ctx, TaskPayload{Goal: goal, TaskID: taskID.String()}, opts...)
+}
+
+func (c *Client) enqueue(ctx context.Context, p TaskPayload, opts ...asynq.Option) (*asynq.TaskInfo, error) {
+	payload, err := json.Marshal(p)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
 	}
@@ -87,6 +101,12 @@ func (s *Server) processTask(ctx context.Context, t *asynq.Task) error {
 	var p TaskPayload
 	if err := json.Unmarshal(t.Payload(), &p); err != nil {
 		return fmt.Errorf("unmarshal payload: %w", err)
+	}
+	if p.TaskID != "" {
+		id, err := uuid.Parse(p.TaskID)
+		if err == nil {
+			return s.runtime.RunTask(ctx, id, p.Goal)
+		}
 	}
 	return s.runtime.Run(ctx, p.Goal)
 }

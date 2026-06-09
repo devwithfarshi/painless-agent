@@ -97,9 +97,12 @@ func Run(ctx context.Context, envPath string) error {
 	fmt.Println("    [1] OpenAI         — GPT-4o, o3-mini, etc.")
 	fmt.Println("    [2] Anthropic      — Claude Sonnet, Opus, Haiku")
 	fmt.Println("    [3] GitHub Copilot — GPT-4o via your Copilot subscription")
+	fmt.Println("    [4] Google Gemini  — Gemini 2.0 Flash, Pro, etc.")
+	fmt.Println("    [5] Ollama         — local models (llama3, mistral, phi3, ...)")
+	fmt.Println("    [6] OpenRouter     — 300+ models via one API key")
 	fmt.Println()
-	providerIdx := promptInt(r, "  Select provider [1-3]: ", 1, 3)
-	providers := []string{"openai", "anthropic", "copilot"}
+	providerIdx := promptInt(r, "  Select provider [1-6]: ", 1, 6)
+	providers := []string{"openai", "anthropic", "copilot", "gemini", "ollama", "openrouter"}
 	provider := providers[providerIdx-1]
 
 	// Step 3: authentication
@@ -143,6 +146,39 @@ func Run(ctx context.Context, envPath string) error {
 		_ = os.Setenv("COPILOT_GITHUB_TOKEN", githubToken)
 		// Stash for model fetch below.
 		apiKey = githubToken
+
+	case "gemini":
+		fmt.Println()
+		fmt.Println("  Google Gemini setup")
+		fmt.Println("  Get your API key at: https://aistudio.google.com/app/apikey")
+		fmt.Print("  API key: ")
+		apiKey = readLine(r)
+		if apiKey == "" {
+			return fmt.Errorf("Gemini API key is required")
+		}
+		envSettings["GEMINI_API_KEY"] = apiKey
+
+	case "ollama":
+		fmt.Println()
+		fmt.Println("  Ollama setup (local)")
+		fmt.Println("  Make sure Ollama is running: https://ollama.ai")
+		fmt.Printf("  Base URL [http://localhost:11434/v1]: ")
+		baseURL := readLine(r)
+		if baseURL == "" {
+			baseURL = "http://localhost:11434/v1"
+		}
+		envSettings["OLLAMA_BASE_URL"] = baseURL
+
+	case "openrouter":
+		fmt.Println()
+		fmt.Println("  OpenRouter setup")
+		fmt.Println("  Get your API key at: https://openrouter.ai/keys")
+		fmt.Print("  API key (sk-or-...): ")
+		apiKey = readLine(r)
+		if apiKey == "" {
+			return fmt.Errorf("OpenRouter API key is required")
+		}
+		envSettings["OPENROUTER_API_KEY"] = apiKey
 	}
 
 	// Step 4: fetch models
@@ -188,9 +224,12 @@ func Run(ctx context.Context, envPath string) error {
 
 	// Step 7: summary
 	providerDisplay := map[string]string{
-		"openai":    "OpenAI",
-		"anthropic": "Anthropic",
-		"copilot":   "GitHub Copilot",
+		"openai":      "OpenAI",
+		"anthropic":   "Anthropic",
+		"copilot":     "GitHub Copilot",
+		"gemini":      "Google Gemini",
+		"ollama":      "Ollama (local)",
+		"openrouter":  "OpenRouter",
 	}[provider]
 	fmt.Println()
 	fmt.Println("  ✓ Configuration saved!")
@@ -286,6 +325,32 @@ func defaultModels(provider string) []string {
 		}
 	case "copilot":
 		return []string{"gpt-4o", "gpt-4o-mini", "o3-mini", "gpt-4-turbo"}
+	case "gemini":
+		return []string{
+			"gemini-2.0-flash",
+			"gemini-2.5-pro",
+			"gemini-2.5-flash",
+			"gemini-1.5-pro",
+			"gemini-1.5-flash",
+		}
+	case "ollama":
+		return []string{
+			"llama3.2",
+			"llama3.1",
+			"qwen2.5",
+			"mistral",
+			"phi3",
+			"gemma3",
+		}
+	case "openrouter":
+		return []string{
+			"meta-llama/llama-3.3-70b-instruct",
+			"anthropic/claude-3.5-sonnet",
+			"openai/gpt-4o",
+			"google/gemini-2.0-flash-001",
+			"mistralai/mistral-7b-instruct",
+			"deepseek/deepseek-chat",
+		}
 	default:
 		return nil
 	}
