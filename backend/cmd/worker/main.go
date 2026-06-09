@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/devwithfarshi/painless-agent/internal/agent"
 	"github.com/devwithfarshi/painless-agent/internal/llm"
@@ -24,7 +22,6 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// First-run onboarding: collect provider, model, and API credentials interactively.
 	if onboarding.IsFirstRun() {
 		if err := onboarding.Run(ctx, ".env"); err != nil {
 			os.Stderr.WriteString("setup failed: " + err.Error() + "\n")
@@ -32,7 +29,6 @@ func main() {
 		}
 	}
 
-	// Inject the saved user name so config.Load picks it up via AGENT_USER_NAME.
 	if name := onboarding.LoadUserName(); name != "" {
 		if os.Getenv("AGENT_USER_NAME") == "" {
 			os.Setenv("AGENT_USER_NAME", name)
@@ -46,7 +42,7 @@ func main() {
 	}
 
 	log := logger.New(cfg.Env)
-	log.Info("starting painless-agent", "env", cfg.Env)
+	log.Info("starting painless-agent worker", "env", cfg.Env)
 
 	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -54,18 +50,16 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
-	log.Info("connected to postgres")
 
 	if err := db.EnablePgVector(ctx, pool); err != nil {
 		log.Error("enable pgvector extension", "error", err)
 		os.Exit(1)
 	}
-
 	if err := db.Migrate(pool); err != nil {
 		log.Error("run migrations", "error", err)
 		os.Exit(1)
 	}
-	log.Info("migrations applied")
+	log.Info("postgres ready")
 
 	rdb, err := db.NewRedis(ctx, cfg.RedisURL)
 	if err != nil {
@@ -73,36 +67,27 @@ func main() {
 		os.Exit(1)
 	}
 	defer rdb.Close()
-	log.Info("connected to redis")
+	log.Info("redis ready")
 
-	// LLM chat provider.
 	provider, err := llm.New(cfg)
 	if err != nil {
 		log.Error("init llm provider", "error", err)
 		os.Exit(1)
 	}
-	if cfg.UserName != "" {
-		log.Info("llm provider ready", "provider", cfg.LLMProvider, "model", provider.Model(), "user", cfg.UserName)
-	} else {
-		log.Info("llm provider ready", "provider", cfg.LLMProvider, "model", provider.Model())
-	}
+	log.Info("llm provider ready", "provider", cfg.LLMProvider, "model", provider.Model())
 
-	// Embedder (always OpenAI for 1536-dim vectors).
-	// pgMem satisfies both memory.MemoryStore and agent.MemoryStore (same method set).
 	var pgMem memorystore.MemoryStore
 	embedder, embErr := llm.NewEmbedder(cfg)
 	if embErr != nil {
-		log.Warn("embedder unavailable — memory store disabled", "error", embErr)
+		log.Warn("embedder unavailable — memory + skills disabled", "error", embErr)
 	} else {
 		log.Info("embedder ready", "model", embedder.Model())
 		pgMem = memorystore.NewPgMemoryStore(pool, embedder)
 	}
 
-	// Task and tool-log stores.
 	taskStore := store.NewTaskStore(pool)
 	toolLogStore := store.NewToolLogStore(pool)
 
-	// Tool engine: summarizer + all registered tools.
 	summarizer := tools.NewSummarizerTool(provider)
 	maxOutput := cfg.ToolMaxOutputKB * 1024
 	if maxOutput == 0 {
@@ -117,7 +102,6 @@ func main() {
 		toolEngine.Register(tools.NewMemoryTool(pgMem))
 	}
 
-	// Code executor: requires a running Docker daemon.
 	dockerRunner, dockerErr := sandbox.NewRunner()
 	if dockerErr != nil {
 		log.Warn("docker unavailable — code_executor tool disabled", "error", dockerErr)
@@ -126,35 +110,23 @@ func main() {
 		log.Info("code_executor tool registered")
 	}
 
-	// Browser tool: uses Docker CDP service if CHROME_CDP_URL is set, local Chrome otherwise.
 	browserTool := tools.NewBrowserTool(cfg.FilesystemRoot, cfg.ChromeCDPURL)
 	toolEngine.Register(browserTool)
-	if cfg.ChromeCDPURL != "" {
-		log.Info("browser tool registered", "mode", "remote", "cdp_url", cfg.ChromeCDPURL)
-	} else {
-		log.Info("browser tool registered", "mode", "local-exec")
-	}
+	defer browserTool.Close()
 
-	// GitHub tool: only registered when a token is configured.
 	if cfg.GitHubToken != "" {
 		toolEngine.Register(tools.NewGitHubTool(cfg.GitHubToken))
 		log.Info("github tool registered")
-	} else {
-		log.Info("GITHUB_TOKEN not set — github tool disabled")
 	}
 
 	log.Info("tool engine ready", "tools", len(toolEngine.Definitions()))
 
-	// Skill store: requires embedder; skipped gracefully if unavailable.
 	var skillStore skills.SkillStore
 	if embedder != nil {
 		skillStore = skills.NewPgSkillStore(pool, embedder, cfg.SkillMatchThreshold)
 		log.Info("skill store ready", "match_threshold", cfg.SkillMatchThreshold)
-	} else {
-		log.Warn("embedder unavailable — skill store disabled")
 	}
 
-	// Reflection store + reflector.
 	reflectionStore := store.NewReflectionStore(pool)
 	var reflector agent.Reflector
 	if skillStore != nil {
@@ -162,12 +134,10 @@ func main() {
 		log.Info("reflector ready", "rating_threshold", cfg.ReflectionRatingThreshold)
 	}
 
-	// Agent runtime — wire all dependencies.
 	runtime := agent.New(provider, taskStore, log, agent.DefaultRuntimeConfig()).
 		WithTools(toolEngine).
 		WithToolLogs(toolLogStore)
 	if pgMem != nil {
-		// pgMem implements agent.MemoryStore (same method set — structural typing).
 		runtime = runtime.WithMemory(pgMem)
 	}
 	if skillStore != nil {
@@ -177,46 +147,19 @@ func main() {
 		runtime = runtime.WithReflector(reflector)
 	}
 
-	// Scheduler client: used by the HTTP server (Order 6) and AGENT_GOAL path.
-	schedClient, schedErr := scheduler.NewClient(cfg.RedisURL)
-	if schedErr != nil {
-		log.Warn("scheduler client unavailable — tasks will run inline", "error", schedErr)
-	} else {
-		defer schedClient.Close()
-		log.Info("scheduler client ready")
+	srv, err := scheduler.NewServer(cfg.RedisURL, runtime, cfg.QueueConcurrency)
+	if err != nil {
+		log.Error("init scheduler server", "error", err)
+		os.Exit(1)
 	}
 
-	// Debug path: set AGENT_GOAL to run a single task synchronously and exit.
-	if goal := os.Getenv("AGENT_GOAL"); goal != "" {
-		log.Info("running goal", "goal", goal)
-		if schedClient != nil {
-			info, err := schedClient.Enqueue(ctx, goal)
-			if err != nil {
-				log.Warn("enqueue failed — falling back to inline run", "error", err)
-				if err := runtime.Run(ctx, goal); err != nil {
-					log.Error("agent run failed", "error", err)
-					os.Exit(1)
-				}
-			} else {
-				log.Info("goal enqueued — run 'make worker' to process it", "task_id", info.ID)
-			}
-		} else {
-			if err := runtime.Run(ctx, goal); err != nil {
-				log.Error("agent run failed", "error", err)
-				os.Exit(1)
-			}
-		}
-		log.Info("agent run complete")
-		return
+	log.Info("worker ready — listening for agent:run tasks", "concurrency", cfg.QueueConcurrency)
+
+	if err := srv.Start(); err != nil {
+		log.Error("worker stopped", "error", err)
+		os.Exit(1)
 	}
 
-	log.Info("infrastructure ready — set AGENT_GOAL=<goal> to enqueue a task; run 'make worker' to process it (HTTP server arrives in Order 6)")
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-	log.Info("shutting down")
-	browserTool.Close()
 	if dockerRunner != nil {
 		_ = dockerRunner.Close()
 	}

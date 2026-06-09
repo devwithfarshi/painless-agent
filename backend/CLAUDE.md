@@ -6,19 +6,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `painless-agent` is a self-hosted, autonomous AI agent platform in Go — a Hermes-style agent with persistent memory, tool use, task planning, skill learning, sandboxed code/browser execution, and long-running workflows streamed to a web dashboard. See `md/project-goal.md` for the vision and `md/development-flow.md` for the phased architecture plan (the authoritative design doc — read it before building any `internal/` package).
 
-**Current state:** Orders 1–4 complete, plus Copilot provider, first-run onboarding wizard, and terminal REPL. `cmd/server/main.go` wires onboarding → config → Postgres → pgvector → migrations → Redis → LLM provider → embedder → memory store → tool engine (including Docker sandbox, browser, GitHub) → TaskStore → AgentRuntime. `cmd/repl/main.go` is an interactive chat loop with the same tool engine. Set `AGENT_GOAL=<goal>` to run an autonomous task end-to-end.
+**Current state:** Orders 1–5 complete, plus Copilot provider, first-run onboarding wizard, and terminal REPL. `cmd/server/main.go` wires onboarding → config → Postgres → pgvector → migrations → Redis → LLM provider → embedder → memory store → skill store → tool engine → TaskStore → ReflectionStore → Reflector → AgentRuntime → scheduler client. `cmd/worker/main.go` is a standalone Asynq worker that processes `agent:run` tasks from the queue. `cmd/repl/main.go` is an interactive chat loop with the same tool engine + memory + skill lookup. Set `AGENT_GOAL=<goal>` to enqueue a task; run `make worker` to process it.
 
 Internal packages built so far:
 - `internal/llm` — `LLMProvider` interface; OpenAI, Anthropic, and **GitHub Copilot** providers; factory. Copilot uses device-code OAuth, Copilot API token exchange/caching, and the OpenAI-compatible `/chat/completions` endpoint. Key exported functions: `ResolveGitHubToken(ctx)`, `ExchangeCopilotToken(ctx, githubToken)`, `FetchCopilotModels(ctx, githubToken)`.
 - `internal/onboarding` — first-run wizard (`IsFirstRun`, `Run`, `LoadUserName`). Collects user name, provider, credentials interactively; writes `LLM_PROVIDER`/`LLM_MODEL`/API key back into `.env`; saves `~/.painless-agent/config.json`. Subsequent runs skip the wizard. Reset with `rm ~/.painless-agent/config.json`.
-- `internal/types` — `Task`/`TaskStep`/`PlanStep`/`Skill`
-- `internal/store` — `TaskStore`, `ToolLogStore` (writes `tool_logs` table)
+- `internal/types` — `Task`/`TaskStep`/`PlanStep`/`Skill` (with `UsageCount int` and `CreatedAt time.Time`)/`SkillStep`
+- `internal/store` — `TaskStore`, `ToolLogStore` (writes `tool_logs` table), `ReflectionStore` (writes `reflections` table — `lessons_json` JSONB + `rating` 1–10)
 - `internal/agent` — `Planner` (injects tool schemas into prompt), `ContextManager`, `AgentRuntime` with real Think→Act→Observe loop (max 10 tool iterations/step). Interfaces: `MemoryStore`, `SkillStore`, `Reflector`, `ToolEngine` (with `Execute`), `ToolLogStore`. Wire via `runtime.With*` methods.
 - `internal/tools` — `Tool` interface, `ToolEngine` registry with output truncation/summarisation. Registered tools: `web_search` (Brave/SerpAPI), `filesystem` (path-allowlisted to `FilesystemRoot`), `http_client` (GET/POST with size + timeout caps), `summarizer` (LLM-backed condense), `memory_store` (agent-triggered memory write), `code_executor` (Docker sandbox), `browser` (headless Chromium via chromedp), `github` (create repo + commit/push via go-github + go-git).
 - `internal/memory` — `MemoryStore` interface + `pgMemoryStore`: `Store` embeds content then inserts; `Search` embeds query then `ORDER BY embedding <=> $1::vector LIMIT k` (cosine); `RecentContext` fetches recent rows by task. Uses `pgvector.NewVector().String()` + `::vector` cast (text encoding, no codec registration needed).
 - `internal/sandbox` — `Runner` wraps the Docker client. `Run(ctx, RunOpts)` creates and starts a container enforcing `--network=none`, `--memory=256m`, `--cpus=0.5`. `Wait` blocks until exit or timeout. `Logs` demultiplexes stdout/stderr via `stdcopy.StdCopy`. `Remove` force-removes. Image name is always derived from the internal `supportedLanguages` map in `code_executor.go`, never from user input.
+- `internal/skills` — `SkillStore` interface (`Match`, `Save`, `IncrementUsage`, `List`, `Get`, `Delete`) + `pgSkillStore`: `Match` embeds goal and does `ORDER BY embedding <=> $1::vector LIMIT 1` — returns nil if distance > threshold; `Save` embeds description and upserts on `name`; same `pgvector.NewVector().String()` + `::vector` pattern as memory.
+- `internal/reflection` — `Reflector` implements `agent.Reflector`. `Reflect(ctx, task, steps)` calls the LLM with an `extract_reflection` tool to get `{lessons, rating, promoteToSkill, skillName, skillSteps}`; saves a `reflections` row; if `rating >= threshold && promoteToSkill`, calls `skillStore.Save` to promote the workflow.
+- `internal/scheduler` — Asynq-backed `Client` (enqueues `agent:run` tasks to Redis) and `Server` (processes the queue, calls `runtime.Run`). `NewClient(redisURL)` / `NewServer(redisURL, runtime, concurrency)` — both parse the Redis URL via `asynq.ParseRedisURI`.
 
-`internal/skills`, `internal/reflection`, `internal/scheduler`, `internal/streaming` are still empty — wired via interfaces in the runtime. `frontend/` and `infra/scripts/*.sh` are stubs.
+`internal/streaming` is still empty — wired via interfaces in the runtime. `frontend/` and `infra/scripts/*.sh` are stubs.
 
 ## Commands
 
@@ -28,8 +31,9 @@ Run from `backend/`:
 make up      # docker compose up -d  (Postgres+pgvector on :2345, Redis on :2346)
 make down    # docker compose down
 make run     # go run ./cmd/server   (requires `make up` first; loads .env)
+make worker  # go run ./cmd/worker   (processes agent:run tasks from the Asynq queue)
 make repl    # go run ./cmd/repl     (interactive chat with the agent)
-make build   # go build -o bin/server ./cmd/server
+make build   # go build -o bin/server ./cmd/server && go build -o bin/worker ./cmd/worker
 make tidy    # go mod tidy
 
 go test ./...                        # all tests

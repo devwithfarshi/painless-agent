@@ -47,6 +47,19 @@ type Config struct {
 
 	// GitHub tool.
 	GitHubToken string // personal access token with repo scope
+
+	// Skill system (Order 5).
+	// SkillMatchThreshold is the maximum cosine distance for a skill to be considered
+	// a match (0 = identical, 1 = orthogonal). Lower = stricter matching.
+	SkillMatchThreshold float64 // default 0.3
+
+	// Reflection system (Order 5).
+	// ReflectionRatingThreshold is the minimum rating (1–10) required to promote a
+	// completed task to a reusable skill.
+	ReflectionRatingThreshold int // default 7
+
+	// Asynq queue settings (Order 5).
+	QueueConcurrency int // number of concurrent worker goroutines; default 1
 }
 
 func Load(envFile string) (*Config, error) {
@@ -85,6 +98,10 @@ func Load(envFile string) (*Config, error) {
 		ChromeCDPURL: os.Getenv("CHROME_CDP_URL"),
 
 		GitHubToken: os.Getenv("GITHUB_TOKEN"),
+
+		SkillMatchThreshold:       envFloat("SKILL_MATCH_THRESHOLD", 0.3),
+		ReflectionRatingThreshold: envInt("REFLECTION_RATING_THRESHOLD", 7),
+		QueueConcurrency:          envInt("QUEUE_CONCURRENCY", 1),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -126,6 +143,16 @@ func envInt(key string, fallback int) int {
 		var n int
 		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
 			return n
+		}
+	}
+	return fallback
+}
+
+func envFloat(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		var f float64
+		if _, err := fmt.Sscanf(v, "%f", &f); err == nil {
+			return f
 		}
 	}
 	return fallback

@@ -57,6 +57,8 @@ type Skill struct {
 	Name        string
 	Description string
 	Steps       []SkillStep
+	UsageCount  int
+	CreatedAt   time.Time
 }
 
 type SkillStep struct {

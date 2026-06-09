@@ -17,6 +17,7 @@ import (
 	memorystore "github.com/devwithfarshi/painless-agent/internal/memory"
 	"github.com/devwithfarshi/painless-agent/internal/onboarding"
 	"github.com/devwithfarshi/painless-agent/internal/sandbox"
+	"github.com/devwithfarshi/painless-agent/internal/skills"
 	"github.com/devwithfarshi/painless-agent/internal/store"
 	"github.com/devwithfarshi/painless-agent/internal/tools"
 	"github.com/devwithfarshi/painless-agent/pkg/config"
@@ -84,10 +85,12 @@ func main() {
 	}
 
 	var memStore memorystore.MemoryStore
+	var skillStore skills.SkillStore
 	if embedder, embErr := llm.NewEmbedder(cfg); embErr == nil {
 		memStore = memorystore.NewPgMemoryStore(pool, embedder)
+		skillStore = skills.NewPgSkillStore(pool, embedder, cfg.SkillMatchThreshold)
 	} else {
-		log.Warn("embedder unavailable — memory disabled", "error", embErr)
+		log.Warn("embedder unavailable — memory + skills disabled", "error", embErr)
 	}
 
 	toolLogStore := store.NewToolLogStore(pool)
@@ -137,7 +140,7 @@ func main() {
 	fmt.Println("type 'exit' or press Ctrl+C to quit")
 	fmt.Println()
 
-	runREPL(ctx, provider, engine, toolLogStore, memStore, name)
+	runREPL(ctx, provider, engine, toolLogStore, memStore, skillStore, name)
 }
 
 func runREPL(
@@ -146,6 +149,7 @@ func runREPL(
 	engine *tools.ToolEngine,
 	toolLogs *store.ToolLogStore,
 	memStore memorystore.MemoryStore,
+	skillStore skills.SkillStore,
 	userName string,
 ) {
 	sessionID := uuid.New()
@@ -208,6 +212,26 @@ func runREPL(
 					fmt.Fprintf(&sb, "- %s\n", m)
 				}
 				sb.WriteString("\n")
+				sb.WriteString(input)
+				input = sb.String()
+			}
+		}
+
+		// Inject a matching skill template if one is found.
+		if skillStore != nil {
+			if skill, err := skillStore.Match(ctx, input); err == nil && skill != nil {
+				fmt.Printf("  ★ skill: %s\n", skill.Name)
+				_ = skillStore.IncrementUsage(ctx, skill.ID)
+				var sb strings.Builder
+				fmt.Fprintf(&sb, "[matched skill: %s]\n", skill.Name)
+				for i, s := range skill.Steps {
+					fmt.Fprintf(&sb, "%d. %s", i+1, s.Description)
+					if s.ToolHint != "" {
+						fmt.Fprintf(&sb, " (use %s)", s.ToolHint)
+					}
+					sb.WriteByte('\n')
+				}
+				sb.WriteString("Adapt this skill template to the current request.\n\n")
 				sb.WriteString(input)
 				input = sb.String()
 			}
