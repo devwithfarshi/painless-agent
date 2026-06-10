@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `painless-agent` is a self-hosted, autonomous AI agent platform in Go — a Hermes-style agent with persistent memory, tool use, task planning, skill learning, sandboxed code/browser execution, and long-running workflows streamed to a web dashboard. See `md/project-goal.md` for the vision and `md/development-flow.md` for the phased architecture plan (the authoritative design doc — read it before building any `internal/` package).
 
-**Current state:** Orders 1–7 complete. `cmd/server/main.go` wires onboarding → config → Postgres → pgvector → migrations → Redis → event emitter → LLM provider (SwappableProvider) → embedder → memory store → skill store → tool engine → TaskStore → ReflectionStore → Reflector → AgentRuntime (with emitter) → scheduler client → HTTP server. The server now listens on `:8080` (configurable via `HTTP_ADDR`). `cmd/worker/main.go` is a standalone Asynq worker. `cmd/repl/main.go` is an interactive REPL. The frontend at `frontend/` is a Next.js + Tailwind + shadcn/ui app with dashboard, tasks, memory, and skills pages.
+**Current state: ALL ORDERS COMPLETE (1–8).** `cmd/server/main.go` wires onboarding → config → Postgres → pgvector → migrations → Redis → event emitter → LLM provider (SwappableProvider) → embedder → memory store → skill store → tool engine → TaskStore → ReflectionStore → Reflector → AgentRuntime (with emitter) → scheduler client → HTTP server. The server listens on `:8080` (configurable via `HTTP_ADDR`). `cmd/worker/main.go` is a standalone Asynq worker. `cmd/repl/main.go` is an interactive REPL. The frontend at `frontend/` is a Next.js + Tailwind + shadcn/ui app. The project has a production-grade test suite, Docker build, OpenAPI spec, and load test scripts.
 
 Internal packages built so far:
 - `internal/llm` — `LLMProvider` interface; OpenAI, Anthropic, **GitHub Copilot**, **Google Gemini**, **Ollama**, and **OpenRouter** providers; factory (`New`, `NewEmbedder`). All providers wrapped with `RetryProvider` (exponential backoff, 3 retries by default, on HTTP 429/5xx/timeout). `SwappableProvider` wraps any provider behind `sync/atomic` for hot-swap via `POST /api/config/provider`. Gemini uses `google.golang.org/genai v1.59.0`; Ollama and OpenRouter reuse the OpenAI SDK with custom base URLs. `NewGemini` ctx-based constructor; message conversion groups consecutive `RoleTool` messages into a single Gemini "user" content.
@@ -22,23 +22,28 @@ Internal packages built so far:
 - `internal/scheduler` — Asynq-backed `Client` (`Enqueue`, `EnqueueTask` with pre-created task ID) and `Server`. `Runner` interface now includes `RunTask(ctx, taskID, goal)`. `TaskPayload` has an optional `task_id` field — when present, the worker calls `RunTask` instead of `Run` to reuse the pre-created DB row.
 - `internal/streaming` — `Emitter`: fans events to in-process `chan Event` subscribers + Redis pub/sub channel `task:<id>`. `Subscribe(taskID)` → in-process (for inline runs). `SubscribeRedis(ctx, taskID)` → Redis pub/sub (for worker-process SSE). `MergeChannels` merges two event channels.
 - `internal/api` — chi-based HTTP API. `NewRouter(cfg, handlers, log)` wires all routes. Middleware: `Logging`, `Auth` (X-API-Key / Bearer), `CORS`, `RateLimit` (httprate). Handlers: tasks CRUD + SSE stream, memory search, skills CRUD, config provider, health.
-- `frontend/` — Next.js 16 + Tailwind v4 + shadcn/ui. Pages: `/dashboard`, `/tasks`, `/tasks/[id]`, `/memory`, `/skills`. Components: `AgentFeed` (SSE via `useTaskStream`), `TaskCard`, `StepTimeline`, `MemoryCard`. API client at `lib/api.ts`; SSE hook at `lib/sse.ts`. `NEXT_PUBLIC_API_URL` env var (default `http://localhost:8080`).
+- `frontend/` — Next.js 16 + Tailwind v4 + shadcn/ui. Pages: `/dashboard`, `/tasks`, `/tasks/[id]`, `/memory`, `/skills`. Components: `AgentFeed` (SSE via `useTaskStream`), `TaskCard`, `StepTimeline`, `MemoryCard`. API client at `lib/api.ts`; SSE hook at `lib/sse.ts`. `NEXT_PUBLIC_API_URL` env var (default `http://localhost:8080`). `frontend/Dockerfile` builds a standalone Next.js image; `next.config.ts` has `output: "standalone"`.
+- **Test suite (Order 8):** Unit tests: `internal/tools/filesystem_test.go` (traversal, CRUD), `internal/tools/engine_test.go` (truncation, summarisation, registry), `internal/agent/planner_test.go` (parsePlanInput, buildPlannerUserMessage), `internal/agent/context_test.go` (Window trimming, system message preservation), `internal/streaming/emitter_test.go` (fan-out, cancel, slow-subscriber drop). Integration tests in `test/e2e/` require `//go:build integration` tag and running Postgres+Redis: `harness_test.go` (shared DB/Redis setup), `store_test.go` (TaskStore CRUD), `api_test.go` (HTTP handler round-trips via httptest).
+- **Production build (Order 8):** `backend/Dockerfile` — multi-stage Go build (golang:1.26-alpine builder → alpine:3.21 runtime). Builds both `cmd/server` and `cmd/worker`; non-root `agent` user; workspace dir pre-created. `infra/docker-compose.override.yml` adds `server`, `worker`, `frontend` services on top of `backend/docker-compose.yml`. `infra/scripts/migrate.sh` and `infra/scripts/seed.sh` are standalone shell scripts for CI / one-off ops.
+- **Docs & load tests (Order 8):** `shared/openapi.yaml` — full OpenAPI 3.1 spec for all 12 API endpoints. `infra/loadtest/api.js` — k6 script (50 VUs, p95 < 500 ms threshold, health/list/create coverage). `infra/loadtest/sse.js` — k6 SSE stream smoke test. `README.md` at project root — quick start, architecture, env vars, Docker deployment, load testing instructions.
 
 ## Commands
 
 Run from `backend/`:
 
 ```bash
-make up      # docker compose up -d  (Postgres+pgvector on :2345, Redis on :2346)
-make down    # docker compose down
-make run     # go run ./cmd/server   (requires `make up` first; loads .env)
-make worker  # go run ./cmd/worker   (processes agent:run tasks from the Asynq queue)
-make repl    # go run ./cmd/repl     (interactive chat with the agent)
-make build   # go build -o bin/server ./cmd/server && go build -o bin/worker ./cmd/worker
-make tidy    # go mod tidy
-make dev     # cd ../frontend && npm run dev  (Next.js dev server on :3000)
+make up               # docker compose up -d  (Postgres+pgvector on :2345, Redis on :2346)
+make down             # docker compose down
+make run              # go run ./cmd/server   (requires `make up` first; loads .env)
+make worker           # go run ./cmd/worker   (processes agent:run tasks from the Asynq queue)
+make repl             # go run ./cmd/repl     (interactive chat with the agent)
+make build            # go build -o bin/server ./cmd/server && go build -o bin/worker ./cmd/worker
+make tidy             # go mod tidy
+make dev              # cd ../frontend && npm run dev  (Next.js dev server on :3000)
+make test             # go test ./...  (unit tests, no external deps)
+make test-integration # go test -tags integration ./test/e2e/...  (requires make up first)
+make loadtest         # k6 run ../infra/loadtest/api.js  (requires running server + k6)
 
-go test ./...                        # all tests
 go test ./internal/agent/... -run TestName -v   # single package / single test
 ```
 
@@ -114,6 +119,10 @@ Copy `.env.example` → `.env` before `make run` (only `DATABASE_URL`/`REDIS_URL
 
 - **Config additions (Order 7):** `GeminiAPIKey`, `OllamaBaseURL` (default `http://localhost:11434/v1`), `OpenRouterAPIKey`, `LLMMaxRetries` (default 3). Validation extended to new providers. Onboarding wizard updated to offer all 6 providers including Gemini, Ollama, OpenRouter setup steps.
 
+- **Test patterns (Order 8):** Unit tests use only stdlib `testing` + temp dirs — no mocks or external deps. Integration tests live in `test/e2e/` behind `//go:build integration`; `newHarness(t)` auto-loads `.env`, connects to real Postgres/Redis, and runs goose migrations — skips if env vars absent. E2E HTTP tests use `httptest.NewRecorder` + `httptest.NewRequest` against the real chi router (no network). The `contains` helper in `filesystem_test.go` is a package-local string search to avoid the standard library `strings` import conflict.
+
+- **Production deployment patterns (Order 8):** `docker build -t painless-agent-server backend/` builds a ~20 MB Alpine image. To run the full production stack: `docker compose -f backend/docker-compose.yml -f infra/docker-compose.override.yml up -d`. The worker service overrides `ENTRYPOINT` with `["./worker"]`. The frontend service uses `output: "standalone"` in `next.config.ts` to copy only required files into the runner stage.
+
 ## Active Plan
-Always read ~/.claude/plans/read-md-project-goal-md-and-md-developme-gentle-neumann.md at the start of each session.
-Current progress: Orders 1–7 complete. Starting Order 8.
+All orders 1–8 complete. See ~/.claude/plans/read-md-project-goal-md-and-md-developme-gentle-neumann.md for full history.
+The project is feature-complete per the development-flow.md specification.
