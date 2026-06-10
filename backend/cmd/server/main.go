@@ -109,6 +109,7 @@ func main() {
 	// Task and tool-log stores.
 	taskStore := store.NewTaskStore(pool)
 	toolLogStore := store.NewToolLogStore(pool)
+	generatedFileStore := store.NewGeneratedFileStore(pool)
 
 	// Tool engine: summarizer + all registered tools.
 	summarizer := tools.NewSummarizerTool(provider)
@@ -118,7 +119,7 @@ func main() {
 	}
 	toolEngine := tools.NewEngine(maxOutput, summarizer.Summarize)
 	toolEngine.Register(tools.NewHTTPClientTool(cfg.ToolTimeoutSecs, cfg.HTTPMaxBodyKB))
-	toolEngine.Register(tools.NewFilesystemTool(cfg.FilesystemRoot))
+	toolEngine.Register(tools.NewFilesystemTool(cfg.FilesystemRoot).WithTracker(generatedFileStore))
 	toolEngine.Register(tools.NewWebSearchTool(cfg.BraveAPIKey, cfg.SerpAPIKey))
 	toolEngine.Register(summarizer)
 	if pgMem != nil {
@@ -196,15 +197,17 @@ func main() {
 
 	// HTTP API server.
 	h := &handlers.Handlers{
-		Tasks:     taskStore,
-		Skills:    skillStore,
-		Memory:    pgMem,
-		Scheduler: schedClient,
-		Emitter:   emitter,
-		Pool:      pool,
-		RDB:       rdb,
-		Provider:  provider,
-		Cfg:       cfg,
+		Tasks:          taskStore,
+		GeneratedFiles: generatedFileStore,
+		Skills:         skillStore,
+		Memory:         pgMem,
+		Scheduler:      schedClient,
+		Runtime:        runtime,
+		Emitter:        emitter,
+		Pool:           pool,
+		RDB:            rdb,
+		Provider:       provider,
+		Cfg:            cfg,
 	}
 	router := api.NewRouter(cfg, h, log)
 	srv := &http.Server{

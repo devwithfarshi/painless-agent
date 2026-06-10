@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/google/uuid"
+
 	"github.com/devwithfarshi/painless-agent/internal/llm"
 	"github.com/devwithfarshi/painless-agent/internal/memory"
 	"github.com/devwithfarshi/painless-agent/internal/scheduler"
@@ -17,17 +19,24 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// TaskRunner is satisfied by AgentRuntime; used for inline task execution.
+type TaskRunner interface {
+	RunTask(ctx context.Context, taskID uuid.UUID, goal string) error
+}
+
 // Handlers holds shared dependencies for all HTTP handlers.
 type Handlers struct {
-	Tasks    *store.TaskStore
-	Skills   skills.SkillStore        // may be nil
-	Memory   memory.MemoryStore       // may be nil
-	Scheduler *scheduler.Client       // may be nil
-	Emitter  *streaming.Emitter
-	Pool     *pgxpool.Pool
-	RDB      *redis.Client
-	Provider *llm.SwappableProvider   // hot-swappable LLM provider
-	Cfg      *config.Config           // live config reference for provider creation
+	Tasks          *store.TaskStore
+	GeneratedFiles *store.GeneratedFileStore
+	Skills         skills.SkillStore      // may be nil
+	Memory         memory.MemoryStore     // may be nil
+	Scheduler      *scheduler.Client      // may be nil
+	Runtime        TaskRunner             // used for inline fallback when Scheduler is nil
+	Emitter        *streaming.Emitter
+	Pool           *pgxpool.Pool
+	RDB            *redis.Client
+	Provider       *llm.SwappableProvider // hot-swappable LLM provider
+	Cfg            *config.Config         // live config reference for provider creation
 }
 
 // writeJSON encodes v as JSON and writes it with statusCode.

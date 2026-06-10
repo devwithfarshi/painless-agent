@@ -10,6 +10,7 @@ import (
 
 	"github.com/devwithfarshi/painless-agent/internal/llm"
 	"github.com/devwithfarshi/painless-agent/internal/store"
+	"github.com/devwithfarshi/painless-agent/internal/tools"
 	"github.com/devwithfarshi/painless-agent/internal/types"
 )
 
@@ -134,6 +135,9 @@ func (r *AgentRuntime) RunTask(ctx context.Context, taskID uuid.UUID, goal strin
 // runTask is the shared implementation for Run and RunTask.
 func (r *AgentRuntime) runTask(ctx context.Context, task types.Task) error {
 	r.log.Info("task created", "task_id", task.ID, "goal", task.Goal)
+
+	// Embed the task ID in context so tools (e.g. filesystem) can record provenance.
+	ctx = tools.WithTaskID(ctx, task.ID)
 
 	if err := r.tasks.UpdateStatus(ctx, task.ID, types.TaskStatusRunning); err != nil {
 		return fmt.Errorf("set task running: %w", err)

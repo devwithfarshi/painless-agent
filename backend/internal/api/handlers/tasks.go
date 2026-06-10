@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -44,12 +45,13 @@ func (h *Handlers) CreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enqueue via Asynq. If unavailable, log a warning (worker path is optional).
-	if h.Scheduler != nil {
-		if _, err := h.Scheduler.EnqueueTask(r.Context(), task.ID, body.Goal); err != nil {
-			// Don't fail the request — the task is created; the client can retry.
-			_ = err
-		}
+	// Always execute inline in a background goroutine so `make run` works
+	// without a separate worker process. The dedicated `make worker` binary
+	// uses its own Asynq consumer loop and does not go through this handler.
+	if h.Runtime != nil {
+		go func() {
+			_ = h.Runtime.RunTask(context.Background(), task.ID, body.Goal)
+		}()
 	}
 
 	writeJSON(w, http.StatusCreated, task)

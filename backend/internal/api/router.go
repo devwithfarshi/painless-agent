@@ -38,6 +38,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, log *slog.Logger) http.
 				r.Get("/", h.GetTask)
 				r.Delete("/", h.CancelTask)
 				r.Get("/stream", h.StreamTask)
+				r.Get("/files", h.GetTaskFiles)
 			})
 		})
 

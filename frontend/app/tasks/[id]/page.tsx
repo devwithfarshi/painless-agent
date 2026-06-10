@@ -6,7 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { AgentFeed } from "@/components/agent/AgentFeed";
 import { StepTimeline } from "@/components/agent/StepTimeline";
-import { WorkspaceFiles } from "@/components/agent/WorkspaceFiles";
+import { TaskFiles } from "@/components/agent/TaskFiles";
 import { api } from "@/lib/api";
 import type { Task, TaskStep } from "@/types/agent";
 
@@ -77,7 +77,7 @@ export default function TaskDetailPage() {
           <StepTimeline steps={steps} />
         </TabsContent>
         <TabsContent value="files" className="mt-4">
-          <WorkspaceFiles since={task.CreatedAt} />
+          <TaskFiles taskId={id} />
         </TabsContent>
       </Tabs>
     </div>

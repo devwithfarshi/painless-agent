@@ -3,14 +3,40 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"mime"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/google/uuid"
 )
+
+// taskIDKey is the context key used to pass the current task ID into tools.
+type taskIDKey struct{}
+
+// WithTaskID returns a context carrying the given task ID, readable by tools.
+func WithTaskID(ctx context.Context, id uuid.UUID) context.Context {
+	return context.WithValue(ctx, taskIDKey{}, id)
+}
+
+// taskIDFromCtx extracts the task ID set by WithTaskID, returning uuid.Nil if absent.
+func taskIDFromCtx(ctx context.Context) uuid.UUID {
+	if id, ok := ctx.Value(taskIDKey{}).(uuid.UUID); ok {
+		return id
+	}
+	return uuid.Nil
+}
+
+// FileTracker is notified whenever the filesystem tool successfully writes a file.
+type FileTracker interface {
+	Track(ctx context.Context, taskID uuid.UUID, fileName, filePath, mimeType string, fileSize int64) error
+}
 
 // FilesystemTool provides read/write/list/delete operations scoped to a root directory.
 type FilesystemTool struct {
-	root string // absolute, cleaned path
+	root    string      // absolute, cleaned path
+	tracker FileTracker // optional; called after successful writes
 }
 
 func NewFilesystemTool(root string) *FilesystemTool {
@@ -19,6 +45,12 @@ func NewFilesystemTool(root string) *FilesystemTool {
 		abs = root
 	}
 	return &FilesystemTool{root: filepath.Clean(abs)}
+}
+
+// WithTracker attaches a FileTracker that is called on every successful write.
+func (t *FilesystemTool) WithTracker(ft FileTracker) *FilesystemTool {
+	t.tracker = ft
+	return t
 }
 
 func (t *FilesystemTool) Name() string { return "filesystem" }
@@ -49,7 +81,7 @@ func (t *FilesystemTool) Schema() map[string]any {
 	}
 }
 
-func (t *FilesystemTool) Execute(_ context.Context, input map[string]any) (ToolResult, error) {
+func (t *FilesystemTool) Execute(ctx context.Context, input map[string]any) (ToolResult, error) {
 	op, _ := input["operation"].(string)
 	relPath, _ := input["path"].(string)
 
@@ -74,7 +106,23 @@ func (t *FilesystemTool) Execute(_ context.Context, input map[string]any) (ToolR
 		if err := os.WriteFile(absPath, []byte(content), 0644); err != nil {
 			return ToolResult{IsError: true, Content: fmt.Sprintf("write %s: %s", relPath, err)}, nil
 		}
-		return ToolResult{Content: fmt.Sprintf("wrote %d bytes to %s", len(content), relPath)}, nil
+		size := int64(len(content))
+		if t.tracker != nil {
+			taskID := taskIDFromCtx(ctx)
+			if taskID != uuid.Nil {
+				ext := strings.ToLower(filepath.Ext(absPath))
+				ct := mime.TypeByExtension(ext)
+				if ct == "" {
+					ct = "application/octet-stream"
+				}
+				if err := t.tracker.Track(ctx, taskID, filepath.Base(absPath), filepath.ToSlash(relPath), ct, size); err != nil {
+					slog.Warn("file tracker failed", "path", relPath, "task_id", taskID, "error", err)
+				}
+			} else {
+				slog.Warn("filesystem write: no task_id in context, skipping file tracking", "path", relPath)
+			}
+		}
+		return ToolResult{Content: fmt.Sprintf("wrote %d bytes to %s", size, relPath)}, nil
 
 	case "list":
 		entries, err := os.ReadDir(absPath)

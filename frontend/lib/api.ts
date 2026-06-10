@@ -1,4 +1,4 @@
-import type { Task, TaskStep, Skill, WorkspaceFile } from "@/types/agent";
+import type { Task, TaskStep, Skill, WorkspaceFile, GeneratedFile } from "@/types/agent";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
@@ -36,6 +36,8 @@ export const api = {
       request(`/api/tasks/${id}`),
     cancel: (id: string): Promise<void> =>
       request(`/api/tasks/${id}`, { method: "DELETE" }),
+    files: (id: string): Promise<GeneratedFile[]> =>
+      request(`/api/tasks/${id}/files`),
   },
   memory: {
     search: (q: string, k = 10): Promise<{ results: string[] }> =>
