@@ -43,6 +43,7 @@ func NewRouter(cfg *config.Config, h *handlers.Handlers, log *slog.Logger) http.
 		})
 
 		r.Route("/memory", func(r chi.Router) {
+			r.Get("/", h.ListMemory)
 			r.Get("/search", h.SearchMemory)
 		})
 

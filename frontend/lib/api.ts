@@ -40,7 +40,9 @@ export const api = {
       request(`/api/tasks/${id}/files`),
   },
   memory: {
-    search: (q: string, k = 10): Promise<{ results: string[] }> =>
+    list: (limit = 50): Promise<{ results: { content: string; created_at: string }[] }> =>
+      request(`/api/memory?limit=${limit}`),
+    search: (q: string, k = 10): Promise<{ results: { content: string; created_at: string }[] }> =>
       request(`/api/memory/search?q=${encodeURIComponent(q)}&k=${k}`),
   },
   skills: {

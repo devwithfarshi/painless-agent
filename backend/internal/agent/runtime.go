@@ -223,8 +223,12 @@ func (r *AgentRuntime) runTask(ctx context.Context, task types.Task) error {
 			"output":  output,
 		})
 
-		// Store step result in memory.
-		_ = r.memory.Store(ctx, output, nil, task.ID)
+		// Store step result in memory (skip if output is too short to embed).
+		if len(output) >= 20 {
+			if merr := r.memory.Store(ctx, output, nil, task.ID); merr != nil {
+				r.log.Warn("store step memory failed", "step_id", step.ID, "error", merr)
+			}
+		}
 
 		r.log.Info("step complete", "step_id", step.ID)
 	}
@@ -304,8 +308,16 @@ func executionSystemPrompt(goal string) string {
 	return fmt.Sprintf(`You are an autonomous AI agent executing a task step-by-step.
 Overall goal: %s
 
-For each step, think carefully and use the available tools as needed.
-Be specific, concise, and action-oriented.`, goal)
+RULES — follow these strictly:
+1. You MUST call a tool to complete each step. Never answer from your training data alone.
+2. Steps that say "search" or "research" → call web_search.
+3. Steps that say "write", "create", or "save" a file → call filesystem.
+4. Steps that say "store", "remember", or "save to memory" → call memory_store.
+5. Steps that say "run" or "execute" code → call code_executor.
+6. After receiving a tool result, produce a concise summary as your final answer for the step.
+7. If a tool returns an error, report the error clearly and do not fabricate results.
+
+Do not describe what you will do — just do it by calling the appropriate tool.`, goal)
 }
 
 // ── No-op implementations ─────────────────────────────────────────────────────
