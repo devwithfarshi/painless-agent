@@ -1,0 +1,71 @@
+# Production compose overlay.
+# Extends backend/docker-compose.yml with the application services.
+# Usage: docker compose -f backend/docker-compose.yml -f infra/docker-compose.override.yml up -d
+
+services:
+  postgres:
+    restart: unless-stopped
+
+  redis:
+    restart: unless-stopped
+
+  # HTTP API server (cmd/server).
+  server:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: painless-agent-server
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/painless-agent?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      HTTP_ADDR: :8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/health | grep -q ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # Background task worker (cmd/worker).
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: painless-agent-worker
+    restart: unless-stopped
+    command: ["./worker"]
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/painless-agent?sslmode=disable
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Next.js frontend.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: painless-agent-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://server:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - server

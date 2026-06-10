@@ -1,0 +1,233 @@
+# painless-agent
+
+A self-hosted, autonomous AI agent platform in Go — a Hermes-style agent OS with persistent memory, tool use, task planning, skill learning, sandboxed code/browser execution, and long-running workflows streamed to a Next.js dashboard.
+
+## Architecture
+
+```
+painless-agent/
+├── backend/          — Go application (module: github.com/devwithfarshi/painless-agent)
+│   ├── cmd/server/   — HTTP API server (chi, SSE streaming)
+│   ├── cmd/worker/   — Asynq background task worker
+│   ├── cmd/repl/     — Interactive terminal REPL
+│   ├── internal/
+│   │   ├── agent/    — AgentRuntime: plan → think → act → observe loop
+│   │   ├── llm/      — LLMProvider interface; OpenAI, Anthropic, Gemini, Ollama, OpenRouter, Copilot
+│   │   ├── tools/    — Tool engine; web_search, filesystem, browser, code_executor, github, …
+│   │   ├── memory/   — pgvector semantic memory store
+│   │   ├── skills/   — Learned skill library (vector similarity match)
+│   │   ├── reflection/ — Post-task reflection + skill promotion
+│   │   ├── scheduler/ — Asynq task queue client/server
+│   │   ├── streaming/ — SSE event emitter (in-process + Redis pub/sub)
+│   │   └── api/      — chi HTTP handlers + middleware
+│   ├── migrations/   — Goose SQL migrations (auto-applied on startup)
+│   └── pkg/          — config, db, logger utilities
+├── frontend/         — Next.js 16 + Tailwind v4 + shadcn/ui dashboard
+├── infra/
+│   ├── docker/       — Sandbox and browser Dockerfiles
+│   ├── loadtest/     — k6 load test scripts
+│   └── scripts/      — migrate.sh, seed.sh
+└── shared/
+    └── openapi.yaml  — API contract (single source of truth)
+```
+
+## Quick start
+
+### Prerequisites
+
+- Go 1.26+
+- Docker + Docker Compose
+- Node.js 20+ (for the frontend)
+
+### 1. Clone and configure
+
+```bash
+git clone https://github.com/devwithfarshi/painless-agent
+cd painless-agent/backend
+cp .env.example .env
+```
+
+Edit `.env` — only `DATABASE_URL` and `REDIS_URL` are strictly required. The first-run wizard will prompt for LLM credentials interactively if they are missing.
+
+### 2. Start infrastructure
+
+```bash
+# From backend/
+make up          # starts Postgres (port 2345) + Redis (port 2346) + headless Chrome (port 9222)
+```
+
+### 3. Start the server
+
+```bash
+make run         # go run ./cmd/server — applies migrations, starts HTTP on :8080
+```
+
+On first run the interactive onboarding wizard will ask for your name and LLM provider credentials. To reset, delete `~/.painless-agent/config.json`.
+
+### 4. Start the worker (optional — for background task processing)
+
+```bash
+# In a separate terminal
+make worker      # go run ./cmd/worker
+```
+
+### 5. Start the frontend
+
+```bash
+make dev         # cd ../frontend && npm run dev — Next.js on :3000
+```
+
+Open [http://localhost:3000/dashboard](http://localhost:3000/dashboard).
+
+## Supported LLM providers
+
+| Provider | Config key | Notes |
+|---|---|---|
+| Anthropic | `ANTHROPIC_API_KEY` | Default: `claude-sonnet-4-6` |
+| OpenAI | `OPENAI_API_KEY` | Default: `gpt-4o` |
+| Google Gemini | `GEMINI_API_KEY` | Default: `gemini-2.0-flash` |
+| Ollama | `OLLAMA_BASE_URL` | Local; default: `http://localhost:11434/v1` |
+| OpenRouter | `OPENROUTER_API_KEY` | Default: `meta-llama/llama-3.3-70b-instruct` |
+| GitHub Copilot | `GITHUB_TOKEN` | Device-code OAuth; no API key needed |
+
+Switch providers at runtime without restarting:
+
+```bash
+curl -X POST http://localhost:8080/api/config/provider \
+  -H 'Content-Type: application/json' \
+  -d '{"provider":"gemini","model":"gemini-2.0-flash"}'
+```
+
+## API
+
+The full OpenAPI 3.1 spec lives at [`shared/openapi.yaml`](shared/openapi.yaml).
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/health` | Infrastructure health |
+| `GET` | `/api/tasks` | List tasks |
+| `POST` | `/api/tasks` | Create + enqueue a task |
+| `GET` | `/api/tasks/:id` | Task detail + steps |
+| `GET` | `/api/tasks/:id/stream` | SSE live event feed |
+| `DELETE` | `/api/tasks/:id` | Cancel task |
+| `GET` | `/api/memory/search?q=...` | Semantic memory search |
+| `GET` | `/api/skills` | List learned skills |
+| `GET` | `/api/skills/:id` | Skill detail |
+| `DELETE` | `/api/skills/:id` | Delete skill |
+| `POST` | `/api/config/provider` | Hot-swap LLM provider |
+
+### Example: run a task
+
+```bash
+curl -s -X POST http://localhost:8080/api/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"goal": "Search the web for Go 1.26 release notes and summarise them"}' \
+  | jq .
+```
+
+Stream its events:
+
+```bash
+curl -N http://localhost:8080/api/tasks/<task-id>/stream
+```
+
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `DATABASE_URL` | — | **Required.** PostgreSQL DSN |
+| `REDIS_URL` | — | **Required.** Redis URL |
+| `LLM_PROVIDER` | `anthropic` | Active chat provider |
+| `LLM_MODEL` | provider default | Model name |
+| `ANTHROPIC_API_KEY` | — | Anthropic API key |
+| `OPENAI_API_KEY` | — | OpenAI API key |
+| `GEMINI_API_KEY` | — | Google Gemini key |
+| `OLLAMA_BASE_URL` | `http://localhost:11434/v1` | Ollama endpoint |
+| `OPENROUTER_API_KEY` | — | OpenRouter key |
+| `BRAVE_API_KEY` | — | Brave Search API (web_search tool) |
+| `SERP_API_KEY` | — | SerpAPI fallback |
+| `GITHUB_TOKEN` | — | GitHub PAT (github tool) |
+| `FILESYSTEM_ROOT` | `workspace/` | Filesystem tool root |
+| `HTTP_ADDR` | `:8080` | Server listen address |
+| `API_KEY` | — | Optional bearer auth key |
+| `AGENT_GOAL` | — | Auto-run this goal on startup |
+| `QUEUE_CONCURRENCY` | `1` | Asynq worker goroutines |
+| `LLM_MAX_RETRIES` | `3` | Provider retry attempts |
+
+## Development commands
+
+```bash
+# From backend/
+make up      # docker compose up (Postgres, Redis, Chrome)
+make down    # docker compose down
+make run     # run the HTTP server
+make worker  # run the Asynq worker
+make repl    # interactive REPL
+make build   # compile server + worker to bin/
+make tidy    # go mod tidy
+make dev     # start Next.js frontend
+
+go test ./...                          # all unit tests
+go test -tags integration ./test/e2e/... # integration tests (requires running Postgres + Redis)
+```
+
+## Production deployment
+
+Build and push Docker images:
+
+```bash
+# Build the server image
+docker build -t painless-agent-server backend/
+
+# Run the full production stack
+docker compose \
+  -f backend/docker-compose.yml \
+  -f infra/docker-compose.override.yml \
+  up -d
+```
+
+See [`infra/docker-compose.override.yml`](infra/docker-compose.override.yml) for the full service definition.
+
+## Load testing
+
+```bash
+# Install k6 (https://k6.io/docs/get-started/installation/)
+BASE_URL=http://localhost:8080 k6 run infra/loadtest/api.js
+BASE_URL=http://localhost:8080 k6 run infra/loadtest/sse.js
+```
+
+## Tools available to the agent
+
+| Tool | Description |
+|---|---|
+| `web_search` | Brave / SerpAPI web search |
+| `browser` | Headless Chrome via chromedp (navigate, click, screenshot, extract text) |
+| `filesystem` | Read, write, list, delete files in the agent workspace |
+| `code_executor` | Run code in an ephemeral Docker sandbox (Python, Node, Go, Bash) |
+| `github` | Create repos, commit and push files via GitHub API + go-git |
+| `http_client` | Raw HTTP GET/POST |
+| `memory_store` | Agent-triggered persistent memory write |
+| `summarizer` | LLM-backed content summarisation |
+
+## How the agent works
+
+```
+User goal
+   │
+   ▼
+Planner          ← relevant memories + matching skill template
+   │ structured steps
+   ▼
+AgentRuntime loop (per step):
+  Think   → LLM selects a tool and builds its input
+  Act     → ToolEngine.Execute dispatches to the tool
+  Observe → result appended to context, stored to memory
+   │
+   ▼
+Reflector        ← extracts lessons, rates the run (1–10)
+   │ rating ≥ threshold
+   ▼
+SkillStore.Save  ← promotes the workflow to a reusable skill
+```
+
+Events are emitted at each stage and delivered to subscribers via SSE.

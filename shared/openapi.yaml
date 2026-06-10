@@ -1,0 +1,499 @@
+openapi: "3.1.0"
+info:
+  title: Painless Agent API
+  version: "1.0.0"
+  description: |
+    REST API for the painless-agent autonomous AI agent platform.
+    Authenticate with `X-API-Key: <key>` or `Authorization: Bearer <key>` when
+    `API_KEY` is configured. All timestamps are RFC 3339 UTC.
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+tags:
+  - name: tasks
+    description: Agent task lifecycle
+  - name: memory
+    description: Semantic memory retrieval
+  - name: skills
+    description: Learned skill library
+  - name: config
+    description: Runtime configuration
+  - name: system
+    description: Health and diagnostics
+
+paths:
+  /api/health:
+    get:
+      operationId: getHealth
+      tags: [system]
+      summary: Health check
+      description: Returns the connectivity status of Postgres and Redis.
+      security: []
+      responses:
+        "200":
+          description: All dependencies reachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: One or more dependencies unreachable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /api/tasks:
+    get:
+      operationId: listTasks
+      tags: [tasks]
+      summary: List all tasks
+      responses:
+        "200":
+          description: Task list (newest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Task"
+    post:
+      operationId: createTask
+      tags: [tasks]
+      summary: Create and enqueue a task
+      description: |
+        Creates a task in the database and enqueues it for background processing.
+        The returned task ID is usable immediately for polling or SSE streaming.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskRequest"
+      responses:
+        "201":
+          description: Task created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Task"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/tasks/{id}:
+    get:
+      operationId: getTask
+      tags: [tasks]
+      summary: Get task details
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+      responses:
+        "200":
+          description: Task with steps
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: cancelTask
+      tags: [tasks]
+      summary: Cancel a task
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+      responses:
+        "204":
+          description: Task cancelled
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/tasks/{id}/stream:
+    get:
+      operationId: streamTask
+      tags: [tasks]
+      summary: Stream task events (SSE)
+      description: |
+        Opens a Server-Sent Events stream for the task. Each `data:` line is a
+        JSON-encoded `AgentEvent`. The stream closes when the task reaches a
+        terminal state (`task_done` or `task_failed`).
+      parameters:
+        - $ref: "#/components/parameters/TaskID"
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: "data: {\"task_id\":\"...\",\"type\":\"step_started\",\"payload\":{}}\n\n"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/memory/search:
+    get:
+      operationId: searchMemory
+      tags: [memory]
+      summary: Semantic memory search
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Natural language query for semantic search
+        - name: k
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 5
+          description: Number of results to return
+      responses:
+        "200":
+          description: Matching memory entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemorySearchResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "503":
+          description: Memory store not configured
+
+  /api/skills:
+    get:
+      operationId: listSkills
+      tags: [skills]
+      summary: List all learned skills
+      responses:
+        "200":
+          description: Skill list (most-used first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Skill"
+
+  /api/skills/{id}:
+    get:
+      operationId: getSkill
+      tags: [skills]
+      summary: Get a skill by ID
+      parameters:
+        - $ref: "#/components/parameters/SkillID"
+      responses:
+        "200":
+          description: Skill detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Skill"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: deleteSkill
+      tags: [skills]
+      summary: Delete a skill
+      parameters:
+        - $ref: "#/components/parameters/SkillID"
+      responses:
+        "204":
+          description: Skill deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/config/provider:
+    post:
+      operationId: setProvider
+      tags: [config]
+      summary: Hot-swap the LLM provider
+      description: |
+        Atomically replaces the active LLM provider without restarting the server.
+        In-flight requests complete against the previous provider.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetProviderRequest"
+      responses:
+        "200":
+          description: Provider switched
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetProviderResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /api/workspace:
+    get:
+      operationId: listWorkspaceFiles
+      tags: [system]
+      summary: List workspace root files
+      responses:
+        "200":
+          description: Directory listing
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+
+  /api/workspace/file:
+    get:
+      operationId: getWorkspaceFile
+      tags: [system]
+      summary: Read a file from the agent workspace
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Relative path within the workspace
+      responses:
+        "200":
+          description: File content
+          content:
+            text/plain:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  securitySchemes:
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    BearerAuth:
+      type: http
+      scheme: bearer
+
+  security:
+    - ApiKeyHeader: []
+    - BearerAuth: []
+
+  parameters:
+    TaskID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    SkillID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    Task:
+      type: object
+      required: [id, goal, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        goal:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed, cancelled]
+        plan:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlanStep"
+          nullable: true
+        error_msg:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TaskStep:
+      type: object
+      required: [id, task_id, description, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        task_id:
+          type: string
+          format: uuid
+        description:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        output:
+          type: string
+        tool_used:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PlanStep:
+      type: object
+      required: [description]
+      properties:
+        description:
+          type: string
+        tool_hint:
+          type: string
+
+    TaskDetail:
+      type: object
+      required: [task, steps]
+      properties:
+        task:
+          $ref: "#/components/schemas/Task"
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskStep"
+
+    Skill:
+      type: object
+      required: [id, name, description, usage_count, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/SkillStep"
+        usage_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    SkillStep:
+      type: object
+      required: [description]
+      properties:
+        description:
+          type: string
+        tool_hint:
+          type: string
+
+    AgentEvent:
+      type: object
+      required: [task_id, type]
+      properties:
+        task_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum:
+            - task_started
+            - step_started
+            - tool_called
+            - tool_result
+            - step_done
+            - step_failed
+            - task_done
+            - task_failed
+        payload:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    HealthResponse:
+      type: object
+      required: [status, db, redis]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        db:
+          type: string
+          enum: [ok, unreachable]
+        redis:
+          type: string
+          enum: [ok, unreachable]
+
+    MemorySearchResponse:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            type: string
+
+    CreateTaskRequest:
+      type: object
+      required: [goal]
+      properties:
+        goal:
+          type: string
+          minLength: 1
+
+    SetProviderRequest:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [openai, anthropic, copilot, gemini, ollama, openrouter]
+        model:
+          type: string
+        api_key:
+          type: string
+
+    SetProviderResponse:
+      type: object
+      required: [provider, model]
+      properties:
+        provider:
+          type: string
+        model:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
